@@ -1,0 +1,149 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* TradingView-style base styles */
+:root {
+  --tv-bg-primary: #131722;
+  --tv-bg-secondary: #1e222d;
+  --tv-bg-tertiary: #2a2e39;
+  --tv-text-primary: #d1d4dc;
+  --tv-text-secondary: #787b86;
+  --tv-border: #363a45;
+  --tv-green: #26a69a;
+  --tv-red: #ef5350;
+  --tv-blue: #2962ff;
+}
+
+.light {
+  --tv-bg-primary: #ffffff;
+  --tv-bg-secondary: #f0f3fa;
+  --tv-bg-tertiary: #e0e3eb;
+  --tv-text-primary: #131722;
+  --tv-text-secondary: #787b86;
+  --tv-border: #e0e3eb;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Trebuchet MS', Roboto, Ubuntu, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: var(--tv-bg-primary);
+  color: var(--tv-text-primary);
+}
+
+/* Custom scrollbar - TradingView style */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--tv-bg-secondary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--tv-border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #434651;
+}
+
+/* Number formatting */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Profit/Loss colors */
+.profit {
+  color: #26a69a;
+}
+
+.loss {
+  color: #ef5350;
+}
+
+/* Pulsing dot animation */
+@keyframes pulse-dot {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.pulse-dot {
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+/* Trade feed animation */
+@keyframes slide-in-top {
+  from {
+    opacity: 0;
+    transform: translateY(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.trade-item-enter {
+  animation: slide-in-top 0.3s ease-out;
+}
+
+/* Panel styles */
+.panel {
+  @apply bg-tv-bg-secondary rounded-lg border border-tv-border;
+}
+
+.panel-header {
+  @apply px-4 py-3 border-b border-tv-border flex items-center justify-between;
+}
+
+.panel-content {
+  @apply p-4;
+}
+
+/* Metric styles */
+.metric-value {
+  @apply text-2xl font-semibold tabular-nums;
+}
+
+.metric-label {
+  @apply text-xs text-tv-text-secondary uppercase tracking-wider;
+}
+
+/* Status indicator */
+.status-dot {
+  @apply w-2 h-2 rounded-full;
+}
+
+.status-dot.active {
+  @apply bg-tv-green pulse-dot;
+}
+
+.status-dot.inactive {
+  @apply bg-tv-text-tertiary;
+}
+
+/* Table styles */
+.tv-table {
+  @apply w-full text-sm;
+}
+
+.tv-table th {
+  @apply text-left text-xs text-tv-text-secondary font-normal uppercase tracking-wider py-2 px-3;
+}
+
+.tv-table td {
+  @apply py-2 px-3 border-t border-tv-border;
+}
+
+.tv-table tr:hover td {
+  @apply bg-tv-bg-hover;
+}
