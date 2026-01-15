@@ -10,7 +10,7 @@ authors = ["Your Name"]
 tokio = { version = "1", features = ["full", "sync", "time", "macros", "rt-multi-thread"] }
 
 # WebSocket
-tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls-native-roots"] }
 futures = "0.3"
 futures-util = "0.3"
 
