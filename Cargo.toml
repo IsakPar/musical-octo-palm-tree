@@ -11,6 +11,7 @@ tokio = { version = "1", features = ["full", "sync", "time", "macros", "rt-multi
 
 # WebSocket
 tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+futures = "0.3"
 futures-util = "0.3"
 
 # HTTP client
@@ -47,6 +48,13 @@ url = "2"
 
 # Random number generation
 rand = "0.8"
+
+# Redis (for pub/sub with Python dashboard)
+redis = { version = "0.24", features = ["tokio-comp", "connection-manager"] }
+
+# Database (PostgreSQL for trade persistence)
+sqlx = { version = "0.7", features = ["runtime-tokio", "postgres", "chrono", "uuid"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
 criterion = "0.5"

@@ -2,6 +2,7 @@
 
 use parking_lot::RwLock;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicI64, Ordering};
 use tracing::{info, warn};
 
 use crate::config::RiskConfig;
@@ -21,15 +22,22 @@ pub struct Position {
 struct DailyStats {
     trades: u64,
     volume: f64,
-    pnl: f64,
 }
 
 /// Risk manager for position and loss limits.
+///
+/// Uses atomic for daily P&L to avoid lock contention on the hot path.
+/// The daily P&L check is the most frequent operation during signal validation.
 pub struct RiskManager {
     config: RiskConfig,
     positions: RwLock<HashMap<TokenId, Position>>,
     daily_stats: RwLock<DailyStats>,
+    /// Daily P&L in microdollars (1 USD = 1_000_000 microdollars) for atomic ops
+    daily_pnl_micro: AtomicI64,
 }
+
+/// Conversion factor: 1 USD = 1_000_000 microdollars
+const MICRO_PER_DOLLAR: f64 = 1_000_000.0;
 
 impl RiskManager {
     /// Create a new risk manager.
@@ -43,21 +51,21 @@ impl RiskManager {
             config,
             positions: RwLock::new(HashMap::new()),
             daily_stats: RwLock::new(DailyStats::default()),
+            daily_pnl_micro: AtomicI64::new(0),
         }
     }
 
     /// Check if a signal passes risk checks.
     pub fn check_signal(&self, signal: &TradeSignal) -> bool {
-        // Check daily loss limit
-        let daily = self.daily_stats.read();
-        if daily.pnl < -self.config.max_daily_loss {
+        // Check daily loss limit using atomic (no lock needed!)
+        let pnl = self.daily_pnl_micro.load(Ordering::Relaxed) as f64 / MICRO_PER_DOLLAR;
+        if pnl < -self.config.max_daily_loss {
             warn!(
                 "Daily loss limit reached: ${:.2} < -${}",
-                daily.pnl, self.config.max_daily_loss
+                pnl, self.config.max_daily_loss
             );
             return false;
         }
-        drop(daily);
 
         // Check notional limit
         let notional = signal.notional();
@@ -140,7 +148,10 @@ impl RiskManager {
                     let pnl = (price - position.avg_cost) * size;
                     position.realized_pnl += pnl;
                     position.size -= size;
-                    daily.pnl += pnl;
+
+                    // Update atomic P&L (lock-free for check_signal)
+                    let pnl_micro = (pnl * MICRO_PER_DOLLAR) as i64;
+                    self.daily_pnl_micro.fetch_add(pnl_micro, Ordering::Relaxed);
 
                     info!(
                         "Trade P&L: ${:.2} (total: ${:.2})",
@@ -167,7 +178,10 @@ impl RiskManager {
 
                 // Arbitrage profit is locked in
                 let profit = profit_per_share * size;
-                daily.pnl += profit;
+
+                // Update atomic P&L (lock-free for check_signal)
+                let profit_micro = (profit * MICRO_PER_DOLLAR) as i64;
+                self.daily_pnl_micro.fetch_add(profit_micro, Ordering::Relaxed);
 
                 info!("Arbitrage profit locked: ${:.2}", profit);
             }
@@ -186,7 +200,7 @@ impl RiskManager {
 
     /// Get daily P&L.
     pub fn get_daily_pnl(&self) -> f64 {
-        self.daily_stats.read().pnl
+        self.daily_pnl_micro.load(Ordering::Relaxed) as f64 / MICRO_PER_DOLLAR
     }
 
     /// Get daily trade count.
@@ -199,6 +213,7 @@ impl RiskManager {
         info!("Resetting daily stats");
         let mut daily = self.daily_stats.write();
         *daily = DailyStats::default();
+        self.daily_pnl_micro.store(0, Ordering::Relaxed);
     }
 }
 

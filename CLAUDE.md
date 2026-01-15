@@ -12,6 +12,60 @@ DO NOT work in:
 
 ---
 
+## CURRENT PRIORITY: 30-Day Cloud Launch
+
+**See `LAUNCH_PLAN.md` for full details.**
+
+### Active Phase Checklist
+
+- [ ] **Phase 1 (Day 1-3):** Validate Rust compiles and connects to Polymarket
+- [ ] **Phase 2 (Day 4-6):** Fix Python dashboard auth (Redis OTP + JWT)
+- [ ] **Phase 3 (Day 7-10):** Create Dockerfiles for both services
+- [ ] **Phase 4 (Day 11-14):** Add PostgreSQL persistence
+- [ ] **Phase 5 (Day 15-18):** Redis Pub/Sub integration (Rust→Python)
+- [ ] **Phase 6 (Day 19-23):** Deploy to Railway.app
+- [ ] **Phase 7 (Day 24-27):** Add monitoring and Slack alerts
+- [ ] **Phase 8 (Day 28-30):** Paper trading validation
+
+### Integration Architecture (DECIDED)
+
+```
+┌─────────────────┐      ┌─────────────────┐
+│   Rust Engine   │─────▶│      Redis      │
+│  (Publisher)    │      │   (Pub/Sub)     │
+└─────────────────┘      └────────┬────────┘
+                                  │
+                         ┌────────▼────────┐
+                         │ Python Dashboard│
+                         │  (Subscriber)   │
+                         └─────────────────┘
+```
+
+**Redis Channels:**
+- `poly:state` - Engine state (100ms interval)
+- `poly:signals` - Trade signals
+- `poly:trades` - Executed trades
+- `poly:errors` - Error notifications
+
+### Files to Create (This Sprint)
+
+| File | Purpose | Phase |
+|------|---------|-------|
+| `Dockerfile` | Rust engine container | 3 |
+| `src/redis/mod.rs` | Redis publisher | 5 |
+| `src/redis/publisher.rs` | Pub/Sub logic | 5 |
+| `src/db/mod.rs` | PostgreSQL persistence | 4 |
+| `docker-compose.yml` | Local dev stack | 3 |
+
+### Latency Optimizations (COMPLETED)
+
+1. **HTTP timeout (500ms)** - `execution/order_manager.rs`
+2. **ECDSA off async runtime** - `spawn_blocking` for signing
+3. **Parallel signal handling** - `futures::join_all` in engine
+4. **Atomic P&L checks** - Lock-free in risk manager
+
+---
+
 ## Project Overview
 
 High-performance trading engine for Polymarket prediction markets. Designed to capture arbitrage opportunities that last milliseconds.
@@ -177,13 +231,30 @@ No need to wait for market settlement!
 - [x] ESPN client
 - [x] Comprehensive configuration via env vars
 
-### TODO
-- [ ] Run `cargo build` and fix any compilation errors
-- [ ] Run `cargo test` to verify all tests pass
-- [ ] Test with real Polymarket WebSocket
-- [ ] Benchmark latency vs Python
-- [ ] Add gRPC server for Python dashboard
-- [ ] Add market discovery (auto-find new markets)
+### TODO (See LAUNCH_PLAN.md for full timeline)
+
+**Phase 1 - Validation:**
+- [ ] Run `cargo build --release` and fix compilation errors
+- [ ] Run `cargo test` to verify tests pass
+- [ ] Test with real Polymarket WebSocket (dry-run mode)
+
+**Phase 3 - Containerization:**
+- [ ] Create `Dockerfile` for Rust engine
+- [ ] Create `docker-compose.yml` for local dev
+
+**Phase 4 - Persistence:**
+- [ ] Add `sqlx` for PostgreSQL
+- [ ] Create `src/db/mod.rs` for trade persistence
+
+**Phase 5 - Redis Integration:**
+- [ ] Add `redis` crate to Cargo.toml
+- [ ] Create `src/redis/publisher.rs`
+- [ ] Publish state/signals/trades to Redis channels
+
+**Phase 7 - Monitoring:**
+- [ ] Add `/health` endpoint
+- [ ] Add Prometheus metrics
+- [ ] Add Slack error notifications
 
 ---
 

@@ -3,8 +3,9 @@
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::time::{interval, timeout};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
@@ -60,45 +61,102 @@ pub struct SubscribeMessage {
     pub assets_ids: Vec<String>,
 }
 
-/// WebSocket handler
+/// WebSocket connection statistics for observability
+#[derive(Debug, Clone)]
+pub struct WebSocketStats {
+    pub messages_received: u64,
+    pub book_updates: u64,
+    pub price_changes: u64,
+    pub reconnect_count: u64,
+    pub uptime_secs: u64,
+}
+
+/// WebSocket handler with observability
 pub struct WebSocketHandler {
     url: String,
     market_data: Arc<MarketData>,
+    // Stats for logging
+    messages_received: AtomicU64,
+    book_updates: AtomicU64,
+    price_changes: AtomicU64,
+    reconnect_count: AtomicU64,
+    connection_start: std::sync::Mutex<Option<Instant>>,
 }
 
 impl WebSocketHandler {
     pub fn new(url: String, market_data: Arc<MarketData>) -> Self {
-        Self { url, market_data }
+        Self {
+            url,
+            market_data,
+            messages_received: AtomicU64::new(0),
+            book_updates: AtomicU64::new(0),
+            price_changes: AtomicU64::new(0),
+            reconnect_count: AtomicU64::new(0),
+            connection_start: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Get WebSocket stats for health checks
+    pub fn get_stats(&self) -> WebSocketStats {
+        let uptime_secs = self.connection_start
+            .lock()
+            .unwrap()
+            .map(|start| start.elapsed().as_secs())
+            .unwrap_or(0);
+
+        WebSocketStats {
+            messages_received: self.messages_received.load(Ordering::Relaxed),
+            book_updates: self.book_updates.load(Ordering::Relaxed),
+            price_changes: self.price_changes.load(Ordering::Relaxed),
+            reconnect_count: self.reconnect_count.load(Ordering::Relaxed),
+            uptime_secs,
+        }
     }
 
     /// Run the WebSocket handler with automatic reconnection
     pub async fn run(&self) -> Result<()> {
+        info!("[WS] WebSocket handler starting | url={}", self.url);
+
         loop {
             match self.connect_and_handle().await {
                 Ok(_) => {
-                    info!("WebSocket connection closed normally");
+                    info!("[WS] WebSocket connection closed normally");
                 }
                 Err(e) => {
-                    error!("WebSocket error: {}", e);
+                    error!("[WS] WebSocket error: {}", e);
                 }
             }
 
-            // Wait before reconnecting
-            warn!("Reconnecting in 5 seconds...");
+            // Clear connection start time
+            *self.connection_start.lock().unwrap() = None;
+
+            // Increment reconnect counter
+            let reconnects = self.reconnect_count.fetch_add(1, Ordering::Relaxed) + 1;
+
+            // Log stats before reconnect
+            let stats = self.get_stats();
+            warn!(
+                "[WS] Reconnecting in 5s | reconnects={} | total_msgs={} | books={} | prices={}",
+                reconnects, stats.messages_received, stats.book_updates, stats.price_changes
+            );
+
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     }
 
     /// Connect and handle messages
     async fn connect_and_handle(&self) -> Result<()> {
-        info!("Connecting to WebSocket: {}", self.url);
+        info!("[WS] Connecting to WebSocket: {}", self.url);
 
         let (ws_stream, _) = timeout(Duration::from_secs(10), connect_async(&self.url))
             .await
             .context("Connection timeout")?
             .context("Failed to connect")?;
 
-        info!("WebSocket connected");
+        // Set connection start time for uptime tracking
+        *self.connection_start.lock().unwrap() = Some(Instant::now());
+
+        info!("[WS] WebSocket connected successfully");
 
         let (mut write, mut read) = ws_stream.split();
 
@@ -112,16 +170,22 @@ impl WebSocketHandler {
         if !token_ids.is_empty() {
             let subscribe_msg = SubscribeMessage {
                 r#type: "subscribe".into(),
-                assets_ids: token_ids,
+                assets_ids: token_ids.clone(),
             };
 
             let msg = serde_json::to_string(&subscribe_msg)?;
             write.send(Message::Text(msg)).await?;
-            info!("Subscribed to {} tokens", self.market_data.token_count());
+            info!("[WS] Subscribed to {} tokens", token_ids.len());
+        } else {
+            info!("[WS] No tokens to subscribe to yet - waiting for market registration");
         }
 
         // Ping interval to keep connection alive
         let mut ping_interval = interval(Duration::from_secs(30));
+        // Heartbeat interval for logging (every 60 seconds)
+        let mut heartbeat_interval = interval(Duration::from_secs(60));
+        // Skip immediate first tick
+        heartbeat_interval.tick().await;
 
         loop {
             tokio::select! {
@@ -129,21 +193,26 @@ impl WebSocketHandler {
                 msg = read.next() => {
                     match msg {
                         Some(Ok(Message::Text(text))) => {
+                            self.messages_received.fetch_add(1, Ordering::Relaxed);
                             self.handle_message(&text);
                         }
                         Some(Ok(Message::Ping(data))) => {
                             write.send(Message::Pong(data)).await?;
+                            debug!("[WS] Responded to ping");
                         }
-                        Some(Ok(Message::Close(_))) => {
-                            info!("Received close frame");
+                        Some(Ok(Message::Pong(_))) => {
+                            debug!("[WS] Received pong");
+                        }
+                        Some(Ok(Message::Close(frame))) => {
+                            info!("[WS] Received close frame: {:?}", frame);
                             break;
                         }
                         Some(Err(e)) => {
-                            error!("WebSocket error: {}", e);
+                            error!("[WS] WebSocket stream error: {}", e);
                             break;
                         }
                         None => {
-                            info!("WebSocket stream ended");
+                            info!("[WS] WebSocket stream ended");
                             break;
                         }
                         _ => {}
@@ -153,6 +222,20 @@ impl WebSocketHandler {
                 // Send periodic pings
                 _ = ping_interval.tick() => {
                     write.send(Message::Ping(vec![])).await?;
+                    debug!("[WS] Sent ping");
+                }
+
+                // Log heartbeat stats
+                _ = heartbeat_interval.tick() => {
+                    let stats = self.get_stats();
+                    info!(
+                        "[WS HEARTBEAT] connected=true | uptime={}s | msgs={} | books={} | prices={} | tokens={}",
+                        stats.uptime_secs,
+                        stats.messages_received,
+                        stats.book_updates,
+                        stats.price_changes,
+                        self.market_data.token_count()
+                    );
                 }
             }
         }
@@ -184,6 +267,9 @@ impl WebSocketHandler {
 
     /// Handle order book update
     fn handle_book_update(&self, update: BookUpdate) {
+        // Increment counter
+        self.book_updates.fetch_add(1, Ordering::Relaxed);
+
         // Parse ALL depth levels (not just first)
         let bids: Vec<DepthLevel> = update
             .bids
@@ -218,7 +304,7 @@ impl WebSocketHandler {
             .update_price(&update.asset_id, best_bid, best_ask);
 
         debug!(
-            "Book update: {} bid={:.4} ask={:.4} depth={}b/{}a",
+            "[WS] Book update: {} bid={:.4} ask={:.4} depth={}b/{}a",
             &update.asset_id[..8.min(update.asset_id.len())],
             best_bid,
             best_ask,
@@ -229,6 +315,9 @@ impl WebSocketHandler {
 
     /// Handle price change update
     fn handle_price_change(&self, update: PriceChangeUpdate) {
+        // Increment counter
+        self.price_changes.fetch_add(1, Ordering::Relaxed);
+
         if let Ok(price) = update.price.parse::<f64>() {
             // Get current price to update only one side
             if let Some(current) = self.market_data.get_price(&update.asset_id) {
@@ -241,7 +330,7 @@ impl WebSocketHandler {
                 self.market_data.update_price(&update.asset_id, bid, ask);
 
                 debug!(
-                    "Price change: {} {} @ {:.4}",
+                    "[WS] Price change: {} {} @ {:.4}",
                     &update.asset_id[..8.min(update.asset_id.len())],
                     update.side,
                     price

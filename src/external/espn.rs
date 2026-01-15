@@ -232,7 +232,8 @@ impl EspnClient {
 
             // Keep only last 100 finished games
             if finished.len() > 100 {
-                finished.drain(0..finished.len() - 100);
+                let drain_count = finished.len() - 100;
+                finished.drain(0..drain_count);
             }
         }
 

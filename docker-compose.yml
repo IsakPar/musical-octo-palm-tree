@@ -1,0 +1,158 @@
+# =============================================================================
+# Poly Trading System - Full Stack Local Development
+# =============================================================================
+# Usage:
+#   docker-compose up              # Start all services
+#   docker-compose up rust-engine  # Start only Rust engine
+#   docker-compose up dashboard    # Start only Python dashboard
+#   docker-compose logs -f         # Follow logs
+#   docker-compose down            # Stop all services
+# =============================================================================
+
+version: '3.8'
+
+services:
+  # ---------------------------------------------------------------------------
+  # Rust Trading Engine
+  # ---------------------------------------------------------------------------
+  rust-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: poly-rust-engine
+    ports:
+      - "8080:8080"  # Health check endpoint
+    environment:
+      # Polymarket API (override in .env)
+      - POLY_PRIVATE_KEY=${POLY_PRIVATE_KEY:-}
+      - POLY_API_KEY=${POLY_API_KEY:-}
+      - POLY_API_SECRET=${POLY_API_SECRET:-}
+      - POLY_WS_URL=${POLY_WS_URL:-wss://ws-subscriptions-clob.polymarket.com/ws/market}
+      - POLY_CLOB_URL=${POLY_CLOB_URL:-https://clob.polymarket.com}
+
+      # Safety defaults
+      - DRY_RUN=true
+      - SUMTO100_PAPER_TRADING=true
+
+      # Strategy config
+      - SUMTO100_ENABLED=true
+      - SUMTO100_MIN_EDGE=0.003
+      - SUMTO100_MIN_LIQUIDITY=50
+      - SUMTO100_FEE_RATE=0.01
+
+      # Risk limits
+      - RISK_MAX_POSITION=100
+      - RISK_MAX_NOTIONAL=500
+      - RISK_MAX_DAILY_LOSS=200
+
+      # Redis connection
+      - REDIS_URL=redis://redis:6379
+
+      # Database connection
+      - DATABASE_URL=postgresql://poly:poly@postgres:5432/poly_trading
+
+      # Slack notifications (optional)
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
+      - SLACK_NOTIFY_ORDERS=true
+      - SLACK_NOTIFY_RISK=true
+      - SLACK_NOTIFY_ERRORS=true
+
+      # Logging
+      - RUST_LOG=poly_rust=info
+    depends_on:
+      - redis
+      - postgres
+    restart: unless-stopped
+    networks:
+      - poly-network
+
+  # ---------------------------------------------------------------------------
+  # Python Dashboard (from ../poly directory)
+  # ---------------------------------------------------------------------------
+  dashboard:
+    build:
+      context: ../poly
+      dockerfile: Dockerfile.fullstack
+    container_name: poly-dashboard
+    ports:
+      - "8000:8000"
+    environment:
+      # Auth
+      - SECRET_KEY=${SECRET_KEY:-dev-secret-key-change-in-prod}
+      - ALLOWED_EMAIL=${ALLOWED_EMAIL:-}
+
+      # Redis for OTP storage and pub/sub
+      - REDIS_URL=redis://redis:6379
+
+      # Database
+      - DATABASE_URL=postgresql://poly:poly@postgres:5432/poly_trading
+
+      # Rust engine (for synth-arb proxy)
+      - SYNTH_ARB_URL=http://rust-engine:8001
+
+      # CORS
+      - ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5173,http://localhost:8000
+    depends_on:
+      - redis
+      - postgres
+    restart: unless-stopped
+    networks:
+      - poly-network
+
+  # ---------------------------------------------------------------------------
+  # Redis (Pub/Sub + OTP Storage)
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: poly-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+    networks:
+      - poly-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL (Trade History + Positions)
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: poly-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=poly
+      - POSTGRES_PASSWORD=poly
+      - POSTGRES_DB=poly_trading
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    restart: unless-stopped
+    networks:
+      - poly-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U poly -d poly_trading"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+# -----------------------------------------------------------------------------
+# Volumes (persistent data)
+# -----------------------------------------------------------------------------
+volumes:
+  redis-data:
+  postgres-data:
+
+# -----------------------------------------------------------------------------
+# Networks
+# -----------------------------------------------------------------------------
+networks:
+  poly-network:
+    driver: bridge

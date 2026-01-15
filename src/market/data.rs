@@ -440,6 +440,11 @@ impl MarketData {
     pub fn market_count(&self) -> usize {
         self.pairs.len()
     }
+
+    /// Get number of order books
+    pub fn order_book_count(&self) -> usize {
+        self.order_books.len()
+    }
 }
 
 impl Default for MarketData {

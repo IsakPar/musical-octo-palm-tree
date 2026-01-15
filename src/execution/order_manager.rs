@@ -4,7 +4,8 @@ use anyhow::{Context, Result};
 use ethers::signers::{LocalWallet, Signer};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info};
 
 use crate::config::Config;
@@ -49,10 +50,13 @@ pub struct OrderResponse {
     pub status: String,
 }
 
+/// HTTP timeout for order requests (500ms for latency-sensitive trading)
+const ORDER_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// Order manager for placing and tracking orders.
 pub struct OrderManager {
     client: Client,
-    wallet: LocalWallet,
+    wallet: Arc<LocalWallet>,
     api_key: String,
     api_secret: String,
     base_url: String,
@@ -69,14 +73,25 @@ impl OrderManager {
 
         info!("Order manager initialized for address: {:?}", wallet.address());
 
+        // Build client with timeout for latency-sensitive trading
+        let client = Client::builder()
+            .timeout(ORDER_TIMEOUT)
+            .build()
+            .context("Failed to build HTTP client")?;
+
         Ok(Self {
-            client: Client::new(),
-            wallet,
+            client,
+            wallet: Arc::new(wallet),
             api_key: config.api_key,
             api_secret: config.api_secret,
             base_url: config.clob_url,
             dry_run: config.dry_run,
         })
+    }
+
+    /// Check if running in dry-run mode (no real orders).
+    pub fn is_dry_run(&self) -> bool {
+        self.dry_run
     }
 
     /// Place a buy order.
@@ -124,12 +139,18 @@ impl OrderManager {
             nonce
         );
 
-        // Sign the message
-        let signature = self.wallet
-            .sign_message(&message)
-            .await
-            .context("Failed to sign order")?
-            .to_string();
+        // Sign the message off the async runtime (ECDSA is CPU-bound)
+        let wallet = Arc::clone(&self.wallet);
+        let msg = message.clone();
+        let signature = tokio::task::spawn_blocking(move || {
+            // Note: LocalWallet::sign_message is actually sync under the hood
+            // We use a blocking task to avoid blocking tokio workers
+            tokio::runtime::Handle::current().block_on(wallet.sign_message(&msg))
+        })
+        .await
+        .context("Signing task panicked")?
+        .context("Failed to sign order")?
+        .to_string();
 
         if self.dry_run {
             info!(

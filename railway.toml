@@ -1,0 +1,23 @@
+# =============================================================================
+# Poly-Rust Trading Engine - Railway.app Configuration
+# =============================================================================
+# Deploy: railway up
+# Docs: https://docs.railway.app/deploy/config-as-code
+# =============================================================================
+
+[build]
+# Use Dockerfile for building
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# Start command (using the binary from Dockerfile)
+startCommand = "poly-rust"
+
+# Health check endpoint
+healthcheckPath = "/health"
+healthcheckTimeout = 10
+
+# Restart on crash
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3

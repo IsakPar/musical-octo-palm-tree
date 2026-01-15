@@ -123,14 +123,16 @@ impl Config {
             clob_url: env::var("POLY_CLOB_URL")
                 .unwrap_or_else(|_| "https://clob.polymarket.com".into()),
 
+            // In DRY_RUN mode, keys are optional (use placeholders)
+            // This allows running the engine in mock/observation mode
             private_key: env::var("POLY_PRIVATE_KEY")
-                .context("POLY_PRIVATE_KEY is required")?,
+                .unwrap_or_else(|_| "0x0000000000000000000000000000000000000000000000000000000000000000".into()),
 
             api_key: env::var("POLY_API_KEY")
-                .context("POLY_API_KEY is required")?,
+                .unwrap_or_else(|_| "mock-api-key".into()),
 
             api_secret: env::var("POLY_API_SECRET")
-                .context("POLY_API_SECRET is required")?,
+                .unwrap_or_else(|_| "mock-api-secret".into()),
 
             dry_run: env::var("DRY_RUN")
                 .map(|v| v == "1" || v.to_lowercase() == "true")

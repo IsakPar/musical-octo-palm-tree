@@ -2,4 +2,4 @@
 
 mod handler;
 
-pub use handler::WebSocketHandler;
+pub use handler::{WebSocketHandler, WebSocketStats};
