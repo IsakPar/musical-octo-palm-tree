@@ -35,6 +35,9 @@ ethers = { version = "2" }
 thiserror = "1"
 anyhow = "1"
 
+# Pin home crate to version compatible with stable Rust (0.5.9 works with Rust 1.70+)
+home = "=0.5.9"
+
 # Logging/tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
