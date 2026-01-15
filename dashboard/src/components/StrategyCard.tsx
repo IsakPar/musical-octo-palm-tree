@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { createChart, ColorType, IChartApi, ISeriesApi, LineData, Time } from 'lightweight-charts'
 import { useBotStore } from '../stores/useBotStore'
-import { Activity, TrendingUp, TrendingDown, Pause, Play } from 'lucide-react'
+import { Pause, Play } from 'lucide-react'
 
 interface StrategyCardProps {
   name: string

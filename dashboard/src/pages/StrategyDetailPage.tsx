@@ -3,7 +3,6 @@ import { useParams } from 'react-router-dom'
 import { useBotStore } from '../stores/useBotStore'
 import MetricCard from '../components/MetricCard'
 import DepthChart from '../components/DepthChart'
-import PortfolioChart from '../components/PortfolioChart'
 import { Activity, Target, TrendingUp, DollarSign, Clock, Zap } from 'lucide-react'
 
 interface StrategyStats {
@@ -38,7 +37,7 @@ export default function StrategyDetailPage() {
   const [yesAsks, setYesAsks] = useState<DepthLevel[]>([])
   const [noBids, setNoBids] = useState<DepthLevel[]>([])
   const [noAsks, setNoAsks] = useState<DepthLevel[]>([])
-  const [loading, setLoading] = useState(true)
+  const [, setLoading] = useState(true)
 
   const strategyName = strategy?.toUpperCase() || 'STRATEGY'
   const strategyDescription = getStrategyDescription(strategy || '')
