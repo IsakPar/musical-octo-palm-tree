@@ -238,6 +238,69 @@ cargo bench
 
 ---
 
+## Polymarket Redemption Mechanics (VERIFIED)
+
+### Key Finding: YES + NO CAN be merged to $1 IMMEDIATELY
+
+You don't have to wait for market settlement! Polymarket supports **merging** at any time:
+
+```
+1 YES token + 1 NO token → 1 USDC (via mergePositions())
+```
+
+### Three Operations
+
+| Operation | Direction | When |
+|-----------|-----------|------|
+| **Split** | 1 USDC → 1 YES + 1 NO | Anytime |
+| **Merge** | 1 YES + 1 NO → 1 USDC | Anytime |
+| **Redeem** | Winning tokens → USDC | After resolution |
+
+### Arbitrage Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  1. Detect opportunity: YES $0.45 + NO $0.50 = $0.95       │
+│  2. Buy YES tokens (CLOB order)                             │
+│  3. Buy NO tokens (CLOB order)                              │
+│  4. Call mergePositions() on CTF contract                   │
+│  5. Receive 1 USDC per merged pair                          │
+│  6. Profit: $0.05 per share (minus fees)                    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Fees to Consider
+
+- CLOB trading fees (~0.5% per side = ~1% total)
+- Gas fees for merge transaction
+- Slippage on partial fills
+
+Edge is only realized after: `min(filled_yes, filled_no)` pairs merged.
+
+### On-Chain Function
+
+```solidity
+// Called on Conditional Token Framework (CTF) contract
+mergePositions(
+    collateralToken,    // USDC address
+    parentCollectionId, // bytes32(0) for Polymarket
+    conditionId,        // Market condition ID
+    partition,          // [1, 2] for YES/NO
+    amount              // Number of pairs to merge
+)
+```
+
+### Official Polymarket Clients
+
+Polymarket provides official clients that handle all this:
+
+- **Rust**: [rs-clob-client](https://github.com/Polymarket/rs-clob-client) - Supports CTF split/merge/redeem
+- **Python**: [py-clob-client](https://github.com/Polymarket/py-clob-client) - Official Python client
+
+**Consider using the official rs-clob-client** for better compatibility and maintenance.
+
+---
+
 ## TODO / Roadmap
 
 ### Phase 1: Core Engine (DONE)
@@ -247,9 +310,11 @@ cargo bench
 - [x] Order manager with signing
 - [x] Risk manager
 - [x] ESPN client
+- [x] Verify redemption mechanics (YES+NO → $1 works!)
 
-### Phase 2: Verification (NEXT)
-- [ ] Verify Polymarket redemption mechanics (YES+NO → $1?)
+### Phase 2: Integration (NEXT)
+- [ ] Evaluate official rs-clob-client vs custom implementation
+- [ ] Add merge operation to order manager
 - [ ] Test order signing with real API
 - [ ] Benchmark actual latency improvements
 
