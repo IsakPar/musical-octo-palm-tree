@@ -9,13 +9,14 @@ authors = ["Your Name"]
 # Async runtime
 tokio = { version = "1", features = ["full", "sync", "time", "macros", "rt-multi-thread"] }
 
-# WebSocket
-tokio-tungstenite = { version = "0.21", features = ["rustls-tls-native-roots"] }
+# WebSocket (default-features=false to exclude native-tls/OpenSSL)
+# connect feature enables connect_async, rustls-tls-native-roots provides TLS
+tokio-tungstenite = { version = "0.21", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 futures = "0.3"
 futures-util = "0.3"
 
-# HTTP client
-reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+# HTTP client (default-features=false to exclude native-tls/OpenSSL)
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 
 # JSON parsing
 serde = { version = "1", features = ["derive"] }
@@ -27,7 +28,8 @@ flume = "0.11"
 parking_lot = "0.12"
 
 # Crypto (for signing Polymarket orders)
-ethers = { version = "2", features = ["rustls"] }
+# Default features include rustls (not openssl), so keep them
+ethers = { version = "2" }
 
 # Error handling
 thiserror = "1"
@@ -49,11 +51,11 @@ url = "2"
 # Random number generation
 rand = "0.8"
 
-# Redis (for pub/sub with Python dashboard)
-redis = { version = "0.24", features = ["tokio-comp", "connection-manager"] }
+# Redis (for pub/sub with Python dashboard) - no TLS needed for internal connection
+redis = { version = "0.24", default-features = false, features = ["tokio-comp", "connection-manager"] }
 
-# Database (PostgreSQL for trade persistence)
-sqlx = { version = "0.7", features = ["runtime-tokio", "postgres", "chrono", "uuid"] }
+# Database (PostgreSQL for trade persistence) - use rustls for TLS
+sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio", "postgres", "chrono", "uuid", "tls-rustls"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]

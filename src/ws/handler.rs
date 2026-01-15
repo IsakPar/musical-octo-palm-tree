@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::{interval, timeout};
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio::net::TcpStream;
+use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tracing::{debug, error, info, warn};
 
 use crate::market::{DepthLevel, MarketData};
@@ -148,8 +149,13 @@ impl WebSocketHandler {
     async fn connect_and_handle(&self) -> Result<()> {
         info!("[WS] Connecting to WebSocket: {}", self.url);
 
-        let (ws_stream, _) = timeout(Duration::from_secs(10), connect_async(&self.url))
-            .await
+        // Use rustls-tls-native-roots (via tokio-tungstenite feature flags)
+        let connect_future = connect_async(&self.url);
+        let timeout_result: Result<
+            Result<(WebSocketStream<MaybeTlsStream<TcpStream>>, _), _>,
+            _
+        > = timeout(Duration::from_secs(10), connect_future).await;
+        let (ws_stream, _) = timeout_result
             .context("Connection timeout")?
             .context("Failed to connect")?;
 
