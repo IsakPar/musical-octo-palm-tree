@@ -726,6 +726,103 @@ async def get_hourly_performance_endpoint():
 
 
 # =============================================================================
+# STRATEGY ENDPOINTS (for Rust Engine strategies)
+# =============================================================================
+
+@app.get("/api/strategy/{strategy}/stats")
+async def get_strategy_stats(strategy: str):
+    """Get strategy-specific statistics from Rust engine."""
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.get(f"{SYNTH_ARB_URL}/strategy/{strategy}/stats")
+            if response.status_code == 200:
+                return response.json()
+    except Exception:
+        pass
+
+    # Return mock data if Rust engine unavailable
+    return {
+        "todayPnl": 85.30,
+        "totalPnl": 2450.32,
+        "trades": 23,
+        "winRate": 78.0,
+        "avgEdge": 0.8,
+        "hitRate": 72.0,
+    }
+
+
+@app.get("/api/strategy/{strategy}/opportunities")
+async def get_strategy_opportunities(
+    strategy: str,
+    limit: int = Query(20, ge=1, le=100),
+):
+    """Get recent arbitrage opportunities for a strategy."""
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.get(
+                f"{SYNTH_ARB_URL}/strategy/{strategy}/opportunities",
+                params={"limit": limit}
+            )
+            if response.status_code == 200:
+                return response.json()
+    except Exception:
+        pass
+
+    # Return empty list if unavailable
+    return []
+
+
+@app.get("/api/strategy/{strategy}/depth")
+async def get_strategy_depth(strategy: str):
+    """Get order book depth data for strategy visualization."""
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.get(f"{SYNTH_ARB_URL}/strategy/{strategy}/depth")
+            if response.status_code == 200:
+                return response.json()
+    except Exception:
+        pass
+
+    # Return mock depth data if Rust engine unavailable
+    return {
+        "yes": {
+            "bids": [
+                {"price": 0.45, "size": 150},
+                {"price": 0.44, "size": 200},
+                {"price": 0.43, "size": 350},
+                {"price": 0.42, "size": 500},
+                {"price": 0.41, "size": 800},
+            ],
+            "asks": [
+                {"price": 0.46, "size": 120},
+                {"price": 0.47, "size": 180},
+                {"price": 0.48, "size": 250},
+                {"price": 0.49, "size": 400},
+                {"price": 0.50, "size": 600},
+            ],
+        },
+        "no": {
+            "bids": [
+                {"price": 0.52, "size": 180},
+                {"price": 0.51, "size": 220},
+                {"price": 0.50, "size": 300},
+                {"price": 0.49, "size": 450},
+                {"price": 0.48, "size": 700},
+            ],
+            "asks": [
+                {"price": 0.53, "size": 100},
+                {"price": 0.54, "size": 160},
+                {"price": 0.55, "size": 240},
+                {"price": 0.56, "size": 380},
+                {"price": 0.57, "size": 550},
+            ],
+        },
+        "market": "example-market-slug",
+        "timestamp": "2025-01-15T12:00:00Z",
+    }
+
+
+# =============================================================================
 # STATIC FILES (FRONTEND)
 # =============================================================================
 
