@@ -56,7 +56,8 @@ const ORDER_TIMEOUT: Duration = Duration::from_millis(500);
 /// Order manager for placing and tracking orders.
 pub struct OrderManager {
     client: Client,
-    wallet: Arc<LocalWallet>,
+    /// Wallet is optional - None in dry-run mode without valid private key
+    wallet: Option<Arc<LocalWallet>>,
     api_key: String,
     api_secret: String,
     base_url: String,
@@ -66,12 +67,27 @@ pub struct OrderManager {
 impl OrderManager {
     /// Create a new order manager.
     pub async fn new(config: Config) -> Result<Self> {
-        let wallet: LocalWallet = config
-            .private_key
-            .parse()
-            .context("Failed to parse private key")?;
-
-        info!("Order manager initialized for address: {:?}", wallet.address());
+        // In dry-run mode, wallet is optional (allows running without private key)
+        let wallet: Option<Arc<LocalWallet>> = if config.dry_run {
+            match config.private_key.parse::<LocalWallet>() {
+                Ok(w) => {
+                    info!("Order manager initialized for address: {:?} (DRY RUN)", w.address());
+                    Some(Arc::new(w))
+                }
+                Err(_) => {
+                    info!("Order manager initialized in DRY RUN mode (no wallet - mock key)");
+                    None
+                }
+            }
+        } else {
+            // Real trading mode - wallet is required
+            let w: LocalWallet = config
+                .private_key
+                .parse()
+                .context("Failed to parse private key - required for live trading")?;
+            info!("Order manager initialized for address: {:?}", w.address());
+            Some(Arc::new(w))
+        };
 
         // Build client with timeout for latency-sensitive trading
         let client = Client::builder()
@@ -81,7 +97,7 @@ impl OrderManager {
 
         Ok(Self {
             client,
-            wallet: Arc::new(wallet),
+            wallet,
             api_key: config.api_key,
             api_secret: config.api_secret,
             base_url: config.clob_url,
@@ -131,6 +147,19 @@ impl OrderManager {
         let price_str = format!("{:.4}", price);
         let size_str = format!("{:.2}", size);
 
+        // In dry-run mode, skip signing and return immediately
+        if self.dry_run {
+            info!(
+                "[DRY RUN] Would place {:?} order: {} @ ${} x {}",
+                side, token_id, price_str, size_str
+            );
+            return Ok(format!("dry-run-{}", nonce));
+        }
+
+        // Wallet is required for real orders
+        let wallet = self.wallet.as_ref()
+            .context("Wallet not available - cannot place real orders")?;
+
         // Create message to sign
         let message = format!(
             "{}:{}:{}:{}:{}",
@@ -140,7 +169,7 @@ impl OrderManager {
         );
 
         // Sign the message off the async runtime (ECDSA is CPU-bound)
-        let wallet = Arc::clone(&self.wallet);
+        let wallet = Arc::clone(wallet);
         let msg = message.clone();
         let signature = tokio::task::spawn_blocking(move || {
             // Note: LocalWallet::sign_message is actually sync under the hood
@@ -151,14 +180,6 @@ impl OrderManager {
         .context("Signing task panicked")?
         .context("Failed to sign order")?
         .to_string();
-
-        if self.dry_run {
-            info!(
-                "[DRY RUN] Would place {:?} order: {} @ ${} x {}",
-                side, token_id, price_str, size_str
-            );
-            return Ok(format!("dry-run-{}", nonce));
-        }
 
         let request = OrderRequest {
             token_id: token_id.clone(),
