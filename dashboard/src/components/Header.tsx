@@ -1,6 +1,7 @@
 import { useLocation } from 'react-router-dom'
 import { useBotStore } from '../stores/useBotStore'
 import { useAuthStore } from '../stores/useAuthStore'
+import LiveIndicator from './LiveIndicator'
 
 const pageTitles: Record<string, string> = {
   '/': 'Dashboard',
@@ -32,12 +33,10 @@ export default function Header() {
         {/* Right Side */}
         <div className="flex items-center gap-4">
           {/* Connection Status */}
-          <div className="flex items-center gap-2">
-            <div className={`w-2 h-2 rounded-full ${connected ? 'bg-tv-green pulse-dot' : 'bg-tv-red'}`} />
-            <span className={`text-sm hidden sm:inline ${darkMode ? 'text-tv-text-secondary' : 'text-tv-light-text-secondary'}`}>
-              {connected ? 'Connected' : 'Disconnected'}
-            </span>
-          </div>
+          <LiveIndicator
+            status={connected ? 'connected' : 'disconnected'}
+            label="Live"
+          />
 
           {/* Divider */}
           <div className={`w-px h-6 hidden sm:block ${darkMode ? 'bg-tv-border' : 'bg-tv-light-border'}`} />

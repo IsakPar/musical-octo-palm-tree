@@ -19,6 +19,7 @@ import SynthArbPage from './pages/SynthArbPage'
 import MarketScannerPage from './pages/MarketScannerPage'
 import DecisionLogPage from './pages/DecisionLogPage'
 import ActivityLogPage from './pages/ActivityLogPage'
+import StrategyDetailPage from './pages/StrategyDetailPage'
 
 function AppLayout() {
   // Initialize WebSocket connection (only when authenticated)
@@ -45,6 +46,7 @@ function AppLayout() {
             <Route path="/scanner" element={<MarketScannerPage />} />
             <Route path="/decisions" element={<DecisionLogPage />} />
             <Route path="/logs" element={<ActivityLogPage />} />
+            <Route path="/strategy/:strategy" element={<StrategyDetailPage />} />
           </Routes>
         </main>
       </div>

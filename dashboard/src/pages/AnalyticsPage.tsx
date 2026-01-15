@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useBotStore } from '../stores/useBotStore'
+import MetricCard from '../components/MetricCard'
+import { TrendingUp, Activity, Target, DollarSign } from 'lucide-react'
 
 interface WinRateStats {
     total_trades: number
@@ -162,40 +164,30 @@ export default function AnalyticsPage() {
                 <>
                     {/* Overview Stats */}
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                        <div className={`${darkMode ? 'bg-tv-bg-secondary border-tv-border' : 'bg-tv-light-bg-secondary border-tv-light-border'} rounded-lg border p-4`}>
-                            <div className={`text-xs uppercase ${darkMode ? 'text-tv-text-secondary' : 'text-tv-light-text-secondary'}`}>
-                                Total Trades
-                            </div>
-                            <div className={`text-2xl font-bold mt-1 ${darkMode ? 'text-tv-text-primary' : 'text-tv-light-text-primary'}`}>
-                                {combinedStats.total_trades}
-                            </div>
-                        </div>
-                        <div className={`${darkMode ? 'bg-tv-bg-secondary border-tv-border' : 'bg-tv-light-bg-secondary border-tv-light-border'} rounded-lg border p-4`}>
-                            <div className={`text-xs uppercase ${darkMode ? 'text-tv-text-secondary' : 'text-tv-light-text-secondary'}`}>
-                                Win Rate
-                            </div>
-                            <div className={`text-2xl font-bold mt-1 ${parseFloat(overallWinRate) >= 50 ? 'text-tv-green' : 'text-tv-red'}`}>
-                                {overallWinRate}%
-                            </div>
-                        </div>
-                        <div className={`${darkMode ? 'bg-tv-bg-secondary border-tv-border' : 'bg-tv-light-bg-secondary border-tv-light-border'} rounded-lg border p-4`}>
-                            <div className={`text-xs uppercase ${darkMode ? 'text-tv-text-secondary' : 'text-tv-light-text-secondary'}`}>
-                                W / L
-                            </div>
-                            <div className={`text-2xl font-bold mt-1 ${darkMode ? 'text-tv-text-primary' : 'text-tv-light-text-primary'}`}>
-                                <span className="text-tv-green">{combinedStats.wins}</span>
-                                <span className={darkMode ? 'text-tv-text-tertiary' : 'text-gray-400'}> / </span>
-                                <span className="text-tv-red">{combinedStats.losses}</span>
-                            </div>
-                        </div>
-                        <div className={`${darkMode ? 'bg-tv-bg-secondary border-tv-border' : 'bg-tv-light-bg-secondary border-tv-light-border'} rounded-lg border p-4`}>
-                            <div className={`text-xs uppercase ${darkMode ? 'text-tv-text-secondary' : 'text-tv-light-text-secondary'}`}>
-                                Total P&L
-                            </div>
-                            <div className={`text-2xl font-bold mt-1 ${combinedStats.total_pnl >= 0 ? 'text-tv-green' : 'text-tv-red'}`}>
-                                {formatPnl(combinedStats.total_pnl)}
-                            </div>
-                        </div>
+                        <MetricCard
+                            title="Total Trades"
+                            value={combinedStats.total_trades}
+                            icon={<Activity className="w-4 h-4" />}
+                        />
+                        <MetricCard
+                            title="Win Rate"
+                            value={overallWinRate}
+                            suffix="%"
+                            variant={parseFloat(overallWinRate) >= 50 ? 'profit' : 'loss'}
+                            icon={<Target className="w-4 h-4" />}
+                        />
+                        <MetricCard
+                            title="W / L"
+                            value={`${combinedStats.wins} / ${combinedStats.losses}`}
+                            icon={<TrendingUp className="w-4 h-4" />}
+                        />
+                        <MetricCard
+                            title="Total P&L"
+                            value={combinedStats.total_pnl.toFixed(2)}
+                            prefix="$"
+                            variant={combinedStats.total_pnl >= 0 ? 'profit' : 'loss'}
+                            icon={<DollarSign className="w-4 h-4" />}
+                        />
                     </div>
 
                     {/* Win Rate by Bot */}
