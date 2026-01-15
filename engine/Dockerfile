@@ -21,6 +21,9 @@ WORKDIR /app
 # Copy manifests first for dependency caching
 COPY Cargo.toml Cargo.lock* ./
 
+# Copy benches directory (referenced in Cargo.toml)
+COPY benches ./benches
+
 # Create a dummy main.rs to build dependencies
 RUN mkdir src && \
     echo "fn main() {}" > src/main.rs && \
