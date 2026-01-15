@@ -2,6 +2,7 @@
 //!
 //! This is the main entry point for the trading engine.
 
+mod analysis;
 mod config;
 mod execution;
 mod external;
@@ -19,7 +20,7 @@ use crate::config::Config;
 use crate::execution::OrderManager;
 use crate::market::MarketData;
 use crate::risk::RiskManager;
-use crate::strategy::{ClipperStrategy, SniperStrategy, StrategyEngine};
+use crate::strategy::{ClipperStrategy, SniperStrategy, StrategyEngine, SumTo100Strategy};
 use crate::ws::WebSocketHandler;
 
 #[tokio::main]
@@ -49,6 +50,7 @@ async fn main() -> Result<()> {
     // Initialize strategies
     let sniper = SniperStrategy::new(config.sniper.clone());
     let clipper = ClipperStrategy::new(config.clipper.clone());
+    let sum_to_100 = SumTo100Strategy::new(config.sum_to_100.clone());
 
     // Create strategy engine
     let mut strategy_engine = StrategyEngine::new(
@@ -58,6 +60,14 @@ async fn main() -> Result<()> {
     );
     strategy_engine.add_strategy(Box::new(sniper));
     strategy_engine.add_strategy(Box::new(clipper));
+    strategy_engine.add_strategy(Box::new(sum_to_100));
+
+    info!(
+        "SumTo100 strategy: {} | min_edge={:.1}% | paper_trading={}",
+        if config.sum_to_100.enabled { "ENABLED" } else { "DISABLED" },
+        config.sum_to_100.min_edge * 100.0,
+        config.sum_to_100.paper_trading
+    );
 
     // Start WebSocket handler
     let ws_handler = WebSocketHandler::new(config.ws_url.clone(), market_data.clone());

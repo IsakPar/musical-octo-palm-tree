@@ -1,95 +1,238 @@
 # Poly-Rust Trading Engine - Claude Context
 
-## Project Overview
+## IMPORTANT: Repository Location
 
-This is a **standalone high-performance trading engine** for Polymarket prediction markets. It's designed to be fast enough to capture arbitrage opportunities that last milliseconds.
+**THIS IS THE CORRECT REPO:** `/Users/isaks_macbook/Desktop/Dev/poly_rust`
 
-**Location:** `/Users/isaks_macbook/Desktop/Dev/poly_rust`
+DO NOT work in:
+- `/Users/isaks_macbook/.claude-worktrees/poly/amazing-maxwell/poly-rust` (worktree - wrong!)
+- Any other location
 
 **Related project:** `/Users/isaks_macbook/Desktop/Dev/poly` (Python dashboard)
+
+---
+
+## Project Overview
+
+High-performance trading engine for Polymarket prediction markets. Designed to capture arbitrage opportunities that last milliseconds.
+
+### Why Rust?
+
+```
+Python: 200ms per order → ALWAYS too late
+Rust:   <10ms per order → Can capture opportunities
+
+Arbitrage opportunities last ~50-100ms
+```
+
+---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    RUST TRADING ENGINE                       │
-├─────────────────────────────────────────────────────────────┤
-│                                                              │
-│  WebSocket ──▶ MarketData ──▶ Strategies ──▶ OrderManager   │
-│  (tokio)      (DashMap)       (10 Hz)        (HTTP+Sign)    │
-│                                    │                         │
-│                                    ▼                         │
-│                              RiskManager                     │
-│                           (position limits)                  │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                      RUST TRADING ENGINE                             │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐          │
+│  │  WebSocket   │───▶│  MarketData  │───▶│  Strategies  │          │
+│  │  Handler     │    │  + OrderBook │    │  (10 Hz)     │          │
+│  │  (tokio)     │    │  (DashMap)   │    │              │          │
+│  └──────────────┘    └──────────────┘    └──────────────┘          │
+│        │                    │                    │                  │
+│        │ Full depth         │ VWAP calcs         │                  │
+│        │ preserved          │                    ▼                  │
+│        │                    │           ┌──────────────┐           │
+│        │                    │           │ RiskManager  │           │
+│        │                    │           └──────────────┘           │
+│        │                    │                    │                  │
+│        │                    │                    ▼                  │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐          │
+│  │   Analysis   │───▶│  SumTo100    │───▶│ OrderManager │          │
+│  │   Module     │    │  Strategy    │    │ or Paper     │          │
+│  └──────────────┘    └──────────────┘    └──────────────┘          │
+│                                                  │                  │
+└──────────────────────────────────────────────────│──────────────────┘
+                                                   │
+                                                   ▼
+                                       ┌─────────────────────┐
+                                       │  Polymarket CLOB    │
+                                       └─────────────────────┘
 ```
+
+---
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
 | `src/main.rs` | Entry point, wires everything together |
-| `src/config.rs` | Environment variable loading |
-| `src/market/data.rs` | Lock-free price storage using DashMap |
-| `src/ws/handler.rs` | WebSocket with auto-reconnect |
-| `src/strategy/traits.rs` | Strategy trait definition |
-| `src/strategy/clipper.rs` | YES+NO arbitrage |
-| `src/strategy/sniper.rs` | Sports time arbitrage |
-| `src/execution/order_manager.rs` | Order placement with signing |
-| `src/external/espn.rs` | ESPN API client |
-| `src/risk/manager.rs` | Position & daily loss tracking |
+| `src/config.rs` | Environment variable loading (all strategies) |
+| `src/market/data.rs` | Lock-free storage: `PriceLevel`, `OrderBook`, `DepthLevel`, `VwapResult` |
+| `src/market/mod.rs` | Exports market types |
+| `src/ws/handler.rs` | WebSocket handler - **preserves full order book depth** |
+| `src/analysis/sum_deviation.rs` | `SumDeviationAnalyzer` - finds YES+NO < $1 opportunities |
+| `src/strategy/traits.rs` | `Strategy` trait, `TradeSignal` enum |
+| `src/strategy/sum_to_100.rs` | **SumTo100Strategy** - depth-aware VWAP arbitrage |
+| `src/strategy/clipper.rs` | Clipper - top-of-book YES+NO arbitrage |
+| `src/strategy/sniper.rs` | Sniper - sports time arbitrage |
+| `src/strategy/engine.rs` | Strategy engine (runs all strategies at 10 Hz) |
+| `src/execution/order_manager.rs` | Order placement with EIP-712 signing |
+| `src/execution/paper.rs` | `PaperTrader` - simulates fills for validation |
+| `src/external/espn.rs` | ESPN API client for sports data |
+| `src/risk/manager.rs` | Position limits, daily loss tracking |
+
+---
 
 ## Trading Strategies
 
-### Clipper (Arbitrage)
-- Scans all markets for `YES + NO < $1.00`
-- Buys both tokens for guaranteed profit
-- **Key question:** Can YES+NO be redeemed for $1 directly, or must wait for settlement?
+### 1. SumTo100 (Depth-Aware Arbitrage) - **PRIMARY STRATEGY**
 
-### Sniper (Sports)
-- Polls ESPN for finished games
-- Buys winning outcomes before Polymarket prices update
-- Window: ~30-60 seconds after game ends
-
-## Why Latency Matters
+**The most advanced strategy** - uses full order book depth for VWAP pricing.
 
 ```
-t=0ms     Opportunity appears (YES+NO = $0.95)
-t=5ms     Fast bots detect it
-t=10ms    Orders hit the book
-t=50ms    Prices adjust
-t=100ms   Opportunity GONE
+Finding: YES_ask + NO_ask < 1.00 (after VWAP calculation)
 
-Python: 200ms per order → ALWAYS too late
-Rust:   <10ms per order → Can capture opportunities
+Example with depth:
+┌─────────────────────────────────────────────────────┐
+│ YES Order Book:           NO Order Book:            │
+│ 50 @ $0.45                100 @ $0.48               │
+│ 50 @ $0.46                                          │
+│                                                     │
+│ VWAP for 100 shares:                                │
+│ YES: (50×0.45 + 50×0.46)/100 = $0.455               │
+│ NO:  100×0.48/100 = $0.48                           │
+│                                                     │
+│ Sum: $0.935 + 1% fees = $0.945                      │
+│ Edge: 5.5% profit per share                         │
+└─────────────────────────────────────────────────────┘
 ```
+
+**Key features:**
+- Uses VWAP (Volume-Weighted Average Price) across depth
+- Checks minimum liquidity requirements
+- Validates order book freshness (rejects stale data)
+- Paper trading mode for validation
+
+**Configuration:**
+```bash
+SUMTO100_ENABLED=true
+SUMTO100_MIN_EDGE=0.003      # 0.3% minimum edge
+SUMTO100_MIN_LIQUIDITY=50    # Min shares available
+SUMTO100_FEE_RATE=0.01       # 1% total fees
+SUMTO100_PAPER_TRADING=true  # Start with paper trading!
+```
+
+### 2. Clipper (Top-of-Book Arbitrage)
+
+Simpler version - only uses best bid/ask prices.
+
+```
+Example:
+YES best ask: $0.45
+NO best ask:  $0.50
+Total:        $0.95 → Buy both, redeem for $1.00
+```
+
+### 3. Sniper (Sports Time Arbitrage)
+
+Exploits information delay between ESPN and Polymarket.
+
+```
+Timeline:
+t=0s    Game ends - Lakers win
+t=30s   ESPN API updates
+t=45s   Our bot buys Lakers YES @ $0.75
+t=90s   Market adjusts to $1.00
+Profit: 33%
+```
+
+---
+
+## Polymarket Redemption (VERIFIED)
+
+**YES + NO CAN be merged to $1 IMMEDIATELY** via `mergePositions()`:
+
+```
+1 YES token + 1 NO token → 1 USDC (via CTF contract)
+```
+
+No need to wait for market settlement!
+
+---
 
 ## Current State
 
-### Done
+### Completed
 - [x] WebSocket handler with auto-reconnect
-- [x] Lock-free market data store
-- [x] Strategy trait and engine
-- [x] Clipper strategy (YES+NO arb)
+- [x] Lock-free market data store with **full depth**
+- [x] `OrderBook` with VWAP calculations (`vwap_buy`, `vwap_sell`)
+- [x] `SumDeviationAnalyzer` for opportunity detection
+- [x] `SumTo100Strategy` - depth-aware arbitrage
+- [x] `PaperTrader` for strategy validation
+- [x] Clipper strategy (top-of-book arb)
 - [x] Sniper strategy (sports time arb)
-- [x] Order manager with signing
-- [x] Risk manager
+- [x] Order manager with EIP-712 signing
+- [x] Risk manager (position limits, daily loss)
 - [x] ESPN client
+- [x] Comprehensive configuration via env vars
 
 ### TODO
-- [ ] **Verify Polymarket redemption** - Can YES+NO → $1 directly?
-- [ ] Test order signing with real Polymarket API
-- [ ] Add gRPC server for Python dashboard integration
-- [ ] Benchmark actual latency vs Python
+- [ ] Run `cargo build` and fix any compilation errors
+- [ ] Run `cargo test` to verify all tests pass
+- [ ] Test with real Polymarket WebSocket
+- [ ] Benchmark latency vs Python
+- [ ] Add gRPC server for Python dashboard
 - [ ] Add market discovery (auto-find new markets)
 
-## Python Integration Plan
+---
 
-The `/python` folder will contain:
-1. **gRPC client** - Connect to Rust engine for status/control
-2. **Dashboard connector** - Feed data to the existing poly dashboard
+## Build & Run
 
-This keeps the Rust engine standalone while allowing the Python dashboard to display its state.
+```bash
+cd /Users/isaks_macbook/Desktop/Dev/poly_rust
+
+# Development
+cargo build
+cargo run
+
+# Production (optimized)
+cargo build --release
+./target/release/poly-rust
+
+# Run tests
+cargo test
+
+# Run specific test
+cargo test market::tests::test_vwap
+```
+
+---
+
+## Configuration
+
+All settings via environment variables. Copy `.env.example` to `.env`:
+
+```bash
+# Required
+POLY_PRIVATE_KEY=your_wallet_key
+POLY_API_KEY=from_polymarket
+POLY_API_SECRET=from_polymarket
+
+# Safety (KEEP TRUE UNTIL TESTED!)
+DRY_RUN=true
+
+# SumTo100 Strategy
+SUMTO100_ENABLED=true
+SUMTO100_MIN_EDGE=0.003
+SUMTO100_PAPER_TRADING=true
+
+# Risk limits
+RISK_MAX_POSITION=100
+RISK_MAX_DAILY_LOSS=200
+```
+
+---
 
 ## Common Tasks
 
@@ -99,38 +242,89 @@ This keeps the Rust engine standalone while allowing the Python dashboard to dis
 3. Add to `src/strategy/mod.rs`
 4. Register in `src/main.rs`
 
+### Adding a new analyzer
+1. Create `src/analysis/your_analyzer.rs`
+2. Add to `src/analysis/mod.rs`
+3. Use in strategy
+
 ### Changing risk limits
 Edit `.env` or modify defaults in `src/config.rs`
 
 ### Testing without real orders
-Keep `DRY_RUN=true` (default) - logs orders without executing
+- Set `DRY_RUN=true` (logs orders without executing)
+- Set `SUMTO100_PAPER_TRADING=true` (simulates fills)
 
-## Environment Variables
-
-Critical ones (see `.env.example` for all):
-```bash
-POLY_PRIVATE_KEY=your_wallet_key    # Required
-POLY_API_KEY=from_polymarket        # Required
-DRY_RUN=true                        # KEEP TRUE until tested!
-RISK_MAX_DAILY_LOSS=200             # Safety limit
-```
-
-## Build & Run
-
-```bash
-# Development
-cargo run
-
-# Production (optimized)
-cargo run --release
-
-# Tests
-cargo test
-```
+---
 
 ## Safety Warnings
 
 1. **ALWAYS start with `DRY_RUN=true`**
-2. **Never risk more than you can afford to lose**
-3. **Test extensively before enabling real trading**
-4. **Start with small position limits**
+2. **ALWAYS start with `SUMTO100_PAPER_TRADING=true`**
+3. **Never risk more than you can afford to lose**
+4. **Test extensively before enabling real trading**
+5. **Start with small position limits**
+6. **Monitor the first few trades manually**
+
+---
+
+## File Structure
+
+```
+poly_rust/
+├── Cargo.toml              # Dependencies
+├── .env.example            # Configuration template
+├── CLAUDE.md               # This file (agent context)
+├── README.md               # User documentation
+├── RUST_ENGINE.md          # Technical deep-dive
+├── python/                 # Python connectors (future)
+└── src/
+    ├── main.rs             # Entry point
+    ├── config.rs           # Configuration
+    ├── analysis/
+    │   ├── mod.rs
+    │   └── sum_deviation.rs # Opportunity detection
+    ├── market/
+    │   ├── mod.rs
+    │   └── data.rs         # OrderBook, VWAP, DepthLevel
+    ├── ws/
+    │   ├── mod.rs
+    │   └── handler.rs      # WebSocket (preserves depth!)
+    ├── strategy/
+    │   ├── mod.rs
+    │   ├── traits.rs       # Strategy trait
+    │   ├── engine.rs       # Evaluation loop
+    │   ├── sum_to_100.rs   # Depth-aware arbitrage
+    │   ├── clipper.rs      # Top-of-book arbitrage
+    │   └── sniper.rs       # Sports time arbitrage
+    ├── execution/
+    │   ├── mod.rs
+    │   ├── order_manager.rs # Real orders
+    │   └── paper.rs        # Paper trading simulator
+    ├── external/
+    │   ├── mod.rs
+    │   └── espn.rs         # ESPN API
+    └── risk/
+        ├── mod.rs
+        └── manager.rs      # Risk limits
+```
+
+---
+
+## Recent Changes (Jan 2025)
+
+1. **Added full order book depth support**
+   - `ws/handler.rs` now preserves ALL depth levels (was only using `.first()`)
+   - `market/data.rs` added `OrderBook`, `DepthLevel`, `VwapResult` types
+
+2. **Added SumTo100 Strategy**
+   - Uses VWAP for realistic fill price calculations
+   - Checks liquidity requirements
+   - Validates data freshness
+
+3. **Added Paper Trading**
+   - `PaperTrader` simulates fills for strategy validation
+   - Tracks P&L, win rate, trade history
+
+4. **Added Analysis Module**
+   - `SumDeviationAnalyzer` scans all markets for opportunities
+   - Returns opportunities sorted by edge (highest first)

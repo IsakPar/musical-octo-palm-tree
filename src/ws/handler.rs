@@ -9,7 +9,7 @@ use tokio::time::{interval, timeout};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
-use crate::market::MarketData;
+use crate::market::{DepthLevel, MarketData};
 
 /// WebSocket message types from Polymarket
 #[derive(Debug, Deserialize)]
@@ -184,27 +184,46 @@ impl WebSocketHandler {
 
     /// Handle order book update
     fn handle_book_update(&self, update: BookUpdate) {
-        // Get best bid and ask
-        let best_bid = update
+        // Parse ALL depth levels (not just first)
+        let bids: Vec<DepthLevel> = update
             .bids
-            .first()
-            .and_then(|p| p.price.parse::<f64>().ok())
-            .unwrap_or(0.0);
+            .iter()
+            .filter_map(|p| {
+                Some(DepthLevel::new(
+                    p.price.parse().ok()?,
+                    p.size.parse().ok()?,
+                ))
+            })
+            .collect();
 
-        let best_ask = update
+        let asks: Vec<DepthLevel> = update
             .asks
-            .first()
-            .and_then(|p| p.price.parse::<f64>().ok())
-            .unwrap_or(1.0);
+            .iter()
+            .filter_map(|p| {
+                Some(DepthLevel::new(
+                    p.price.parse().ok()?,
+                    p.size.parse().ok()?,
+                ))
+            })
+            .collect();
 
-        // Update market data
-        self.market_data.update_price(&update.asset_id, best_bid, best_ask);
+        // Store full order book depth
+        self.market_data
+            .update_order_book(&update.asset_id, bids.clone(), asks.clone());
+
+        // Also update top-of-book PriceLevel for backward compatibility with existing strategies
+        let best_bid = bids.first().map(|l| l.price).unwrap_or(0.0);
+        let best_ask = asks.first().map(|l| l.price).unwrap_or(1.0);
+        self.market_data
+            .update_price(&update.asset_id, best_bid, best_ask);
 
         debug!(
-            "Book update: {} bid={:.4} ask={:.4}",
+            "Book update: {} bid={:.4} ask={:.4} depth={}b/{}a",
             &update.asset_id[..8.min(update.asset_id.len())],
             best_bid,
-            best_ask
+            best_ask,
+            bids.len(),
+            asks.len()
         );
     }
 

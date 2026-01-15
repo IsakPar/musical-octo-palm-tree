@@ -12,6 +12,159 @@ pub type TokenId = String;
 /// Market ID type
 pub type MarketId = String;
 
+/// Single level in order book (price + size at that level)
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DepthLevel {
+    pub price: f64,
+    pub size: f64,
+}
+
+impl DepthLevel {
+    pub fn new(price: f64, size: f64) -> Self {
+        Self { price, size }
+    }
+}
+
+/// VWAP calculation result
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VwapResult {
+    /// Volume-weighted average price
+    pub vwap: f64,
+    /// Total fillable size at this VWAP
+    pub total_size: f64,
+    /// Number of depth levels consumed
+    pub levels_used: usize,
+}
+
+/// Full order book for a token
+#[derive(Clone, Debug)]
+pub struct OrderBook {
+    pub token_id: TokenId,
+    /// Bids sorted by price descending (best/highest first)
+    pub bids: Vec<DepthLevel>,
+    /// Asks sorted by price ascending (best/lowest first)
+    pub asks: Vec<DepthLevel>,
+    pub timestamp_ns: u64,
+}
+
+impl OrderBook {
+    pub fn new(token_id: TokenId) -> Self {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+
+        Self {
+            token_id,
+            bids: Vec::new(),
+            asks: Vec::new(),
+            timestamp_ns: now,
+        }
+    }
+
+    /// Get best bid price (highest)
+    #[inline]
+    pub fn best_bid(&self) -> Option<f64> {
+        self.bids.first().map(|l| l.price)
+    }
+
+    /// Get best ask price (lowest)
+    #[inline]
+    pub fn best_ask(&self) -> Option<f64> {
+        self.asks.first().map(|l| l.price)
+    }
+
+    /// Calculate VWAP for buying (lifting asks)
+    /// Returns the volume-weighted average price to fill `target_size` shares
+    pub fn vwap_buy(&self, target_size: f64) -> Option<VwapResult> {
+        if self.asks.is_empty() || target_size <= 0.0 {
+            return None;
+        }
+
+        let mut remaining = target_size;
+        let mut total_cost = 0.0;
+        let mut total_filled = 0.0;
+        let mut levels_used = 0;
+
+        for level in &self.asks {
+            if remaining <= 0.0 {
+                break;
+            }
+
+            let fill_size = remaining.min(level.size);
+            total_cost += fill_size * level.price;
+            total_filled += fill_size;
+            remaining -= fill_size;
+            levels_used += 1;
+        }
+
+        if total_filled > 0.0 {
+            Some(VwapResult {
+                vwap: total_cost / total_filled,
+                total_size: total_filled,
+                levels_used,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Calculate VWAP for selling (hitting bids)
+    /// Returns the volume-weighted average price to fill `target_size` shares
+    pub fn vwap_sell(&self, target_size: f64) -> Option<VwapResult> {
+        if self.bids.is_empty() || target_size <= 0.0 {
+            return None;
+        }
+
+        let mut remaining = target_size;
+        let mut total_proceeds = 0.0;
+        let mut total_filled = 0.0;
+        let mut levels_used = 0;
+
+        for level in &self.bids {
+            if remaining <= 0.0 {
+                break;
+            }
+
+            let fill_size = remaining.min(level.size);
+            total_proceeds += fill_size * level.price;
+            total_filled += fill_size;
+            remaining -= fill_size;
+            levels_used += 1;
+        }
+
+        if total_filled > 0.0 {
+            Some(VwapResult {
+                vwap: total_proceeds / total_filled,
+                total_size: total_filled,
+                levels_used,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Get total bid liquidity
+    pub fn total_bid_size(&self) -> f64 {
+        self.bids.iter().map(|l| l.size).sum()
+    }
+
+    /// Get total ask liquidity
+    pub fn total_ask_size(&self) -> f64 {
+        self.asks.iter().map(|l| l.size).sum()
+    }
+
+    /// Check if order book data is stale (older than max_age_ns)
+    pub fn is_stale(&self, max_age_ns: u64) -> bool {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+
+        now.saturating_sub(self.timestamp_ns) > max_age_ns
+    }
+}
+
 /// A YES/NO token pair for a market
 #[derive(Clone, Debug)]
 pub struct MarketPair {
@@ -60,6 +213,9 @@ pub struct MarketData {
     /// Token prices (lock-free reads via DashMap)
     prices: DashMap<TokenId, PriceLevel>,
 
+    /// Full order books per token (lock-free reads via DashMap)
+    order_books: DashMap<TokenId, OrderBook>,
+
     /// Market pairs (YES/NO mapping)
     pairs: DashMap<MarketId, MarketPair>,
 
@@ -84,6 +240,7 @@ impl MarketData {
     pub fn with_history_size(max_history_size: usize) -> Self {
         Self {
             prices: DashMap::new(),
+            order_books: DashMap::new(),
             pairs: DashMap::new(),
             token_to_market: DashMap::new(),
             history: DashMap::new(),
@@ -123,6 +280,38 @@ impl MarketData {
     #[inline]
     pub fn get_bid(&self, token_id: &TokenId) -> Option<f64> {
         self.prices.get(token_id).map(|p| p.bid)
+    }
+
+    /// Update full order book for a token (preserves depth)
+    #[inline]
+    pub fn update_order_book(&self, token_id: &TokenId, bids: Vec<DepthLevel>, asks: Vec<DepthLevel>) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+
+        let order_book = OrderBook {
+            token_id: token_id.clone(),
+            bids,
+            asks,
+            timestamp_ns: now,
+        };
+
+        self.order_books.insert(token_id.clone(), order_book);
+        self.last_update_ns.store(now, Ordering::Release);
+    }
+
+    /// Get full order book for a token (lock-free)
+    #[inline]
+    pub fn get_order_book(&self, token_id: &TokenId) -> Option<OrderBook> {
+        self.order_books.get(token_id).map(|ob| ob.clone())
+    }
+
+    /// Get order books for both YES and NO tokens in a pair
+    pub fn get_pair_order_books(&self, pair: &MarketPair) -> Option<(OrderBook, OrderBook)> {
+        let yes_book = self.get_order_book(&pair.yes_token)?;
+        let no_book = self.get_order_book(&pair.no_token)?;
+        Some((yes_book, no_book))
     }
 
     /// Register a market pair
@@ -311,5 +500,87 @@ mod tests {
 
         let history = data.get_history(&token).unwrap();
         assert_eq!(history.len(), 10);
+    }
+
+    #[test]
+    fn test_vwap_buy_single_level() {
+        let mut book = OrderBook::new("token1".into());
+        book.asks = vec![DepthLevel::new(0.50, 100.0)];
+
+        let result = book.vwap_buy(50.0).unwrap();
+        assert!((result.vwap - 0.50).abs() < 0.0001);
+        assert!((result.total_size - 50.0).abs() < 0.0001);
+        assert_eq!(result.levels_used, 1);
+    }
+
+    #[test]
+    fn test_vwap_buy_multiple_levels() {
+        let mut book = OrderBook::new("token1".into());
+        // Ask: 100 @ $0.50, 100 @ $0.52
+        book.asks = vec![
+            DepthLevel::new(0.50, 100.0),
+            DepthLevel::new(0.52, 100.0),
+        ];
+
+        // Try to buy 150 shares
+        // 100 @ 0.50 = $50
+        // 50 @ 0.52 = $26
+        // Total: $76 / 150 = $0.5067
+        let result = book.vwap_buy(150.0).unwrap();
+        let expected_vwap = (100.0 * 0.50 + 50.0 * 0.52) / 150.0;
+        assert!((result.vwap - expected_vwap).abs() < 0.0001);
+        assert!((result.total_size - 150.0).abs() < 0.0001);
+        assert_eq!(result.levels_used, 2);
+    }
+
+    #[test]
+    fn test_vwap_buy_insufficient_liquidity() {
+        let mut book = OrderBook::new("token1".into());
+        book.asks = vec![DepthLevel::new(0.50, 50.0)];
+
+        // Try to buy 100 but only 50 available
+        let result = book.vwap_buy(100.0).unwrap();
+        assert!((result.total_size - 50.0).abs() < 0.0001);
+        assert_eq!(result.levels_used, 1);
+    }
+
+    #[test]
+    fn test_vwap_sell_multiple_levels() {
+        let mut book = OrderBook::new("token1".into());
+        // Bids: 100 @ $0.48 (best), 100 @ $0.46
+        book.bids = vec![
+            DepthLevel::new(0.48, 100.0),
+            DepthLevel::new(0.46, 100.0),
+        ];
+
+        // Try to sell 150 shares
+        let result = book.vwap_sell(150.0).unwrap();
+        let expected_vwap = (100.0 * 0.48 + 50.0 * 0.46) / 150.0;
+        assert!((result.vwap - expected_vwap).abs() < 0.0001);
+        assert!((result.total_size - 150.0).abs() < 0.0001);
+        assert_eq!(result.levels_used, 2);
+    }
+
+    #[test]
+    fn test_order_book_update() {
+        let data = MarketData::new();
+        let token = "0x456".to_string();
+
+        let bids = vec![
+            DepthLevel::new(0.48, 100.0),
+            DepthLevel::new(0.46, 200.0),
+        ];
+        let asks = vec![
+            DepthLevel::new(0.50, 150.0),
+            DepthLevel::new(0.52, 100.0),
+        ];
+
+        data.update_order_book(&token, bids, asks);
+
+        let book = data.get_order_book(&token).unwrap();
+        assert_eq!(book.bids.len(), 2);
+        assert_eq!(book.asks.len(), 2);
+        assert!((book.best_bid().unwrap() - 0.48).abs() < 0.0001);
+        assert!((book.best_ask().unwrap() - 0.50).abs() < 0.0001);
     }
 }

@@ -30,6 +30,9 @@ pub struct Config {
 
     /// Clipper strategy config
     pub clipper: ClipperConfig,
+
+    /// SumTo100 strategy config
+    pub sum_to_100: SumTo100Config,
 }
 
 #[derive(Clone, Debug)]
@@ -81,6 +84,33 @@ pub struct ClipperConfig {
 
     /// Maximum notional per arb trade
     pub max_notional: f64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SumTo100Config {
+    /// Whether SumTo100 strategy is enabled
+    pub enabled: bool,
+
+    /// Minimum edge after fees (default: 0.003 = 0.3%)
+    pub min_edge: f64,
+
+    /// Maximum shares per trade
+    pub max_position: f64,
+
+    /// Maximum USD per trade
+    pub max_notional: f64,
+
+    /// Minimum liquidity required at VWAP
+    pub min_liquidity: f64,
+
+    /// Total fee rate (both sides)
+    pub fee_rate: f64,
+
+    /// Paper trading mode (simulate fills instead of real orders)
+    pub paper_trading: bool,
+
+    /// Maximum age of order book data in milliseconds before rejecting
+    pub max_book_age_ms: u64,
 }
 
 impl Config {
@@ -180,6 +210,46 @@ impl Config {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(100.0),
             },
+
+            sum_to_100: SumTo100Config {
+                enabled: env::var("SUMTO100_ENABLED")
+                    .map(|v| v == "1" || v.to_lowercase() == "true")
+                    .unwrap_or(true),
+
+                min_edge: env::var("SUMTO100_MIN_EDGE")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0.003), // 0.3% minimum edge
+
+                max_position: env::var("SUMTO100_MAX_POSITION")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(100.0),
+
+                max_notional: env::var("SUMTO100_MAX_NOTIONAL")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(100.0),
+
+                min_liquidity: env::var("SUMTO100_MIN_LIQUIDITY")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(50.0),
+
+                fee_rate: env::var("SUMTO100_FEE_RATE")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0.01), // 1% total fees
+
+                paper_trading: env::var("SUMTO100_PAPER_TRADING")
+                    .map(|v| v == "1" || v.to_lowercase() == "true")
+                    .unwrap_or(true), // Default to paper trading for safety
+
+                max_book_age_ms: env::var("SUMTO100_MAX_BOOK_AGE_MS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(500), // 500ms max staleness
+            },
         })
     }
 }
@@ -215,6 +285,21 @@ impl Default for ClipperConfig {
             min_profit: 0.01,
             max_position: 100.0,
             max_notional: 100.0,
+        }
+    }
+}
+
+impl Default for SumTo100Config {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_edge: 0.003,       // 0.3% minimum edge
+            max_position: 100.0,
+            max_notional: 100.0,
+            min_liquidity: 50.0,
+            fee_rate: 0.01,       // 1% total fees
+            paper_trading: true,  // Safe default
+            max_book_age_ms: 500, // 500ms max staleness
         }
     }
 }

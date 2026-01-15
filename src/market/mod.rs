@@ -4,4 +4,4 @@
 
 mod data;
 
-pub use data::{MarketData, MarketPair, PriceLevel};
+pub use data::{DepthLevel, MarketData, MarketPair, OrderBook, PriceLevel, TokenId, VwapResult};
