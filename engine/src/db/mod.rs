@@ -5,4 +5,4 @@
 
 mod repository;
 
-pub use repository::{TradeRepository, Trade, ArbTrade};
+pub use repository::{ArbTrade, Trade, TradeRepository};

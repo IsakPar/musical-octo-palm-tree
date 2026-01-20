@@ -54,12 +54,19 @@ url = "2"
 # Random number generation
 rand = "0.8"
 
+# Graceful shutdown support
+tokio-util = { version = "0.7", features = ["rt"] }
+
 # Redis (for pub/sub with Python dashboard) - no TLS needed for internal connection
 redis = { version = "0.24", default-features = false, features = ["tokio-comp", "connection-manager"] }
 
 # Database (PostgreSQL for trade persistence) - use rustls for TLS
 sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio", "postgres", "chrono", "uuid", "tls-rustls"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+
+# Prometheus metrics for observability
+prometheus = "0.13"
+lazy_static = "1.4"
 
 [dev-dependencies]
 criterion = "0.5"

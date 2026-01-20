@@ -122,7 +122,7 @@ mod tests {
         let config = ClipperConfig {
             enabled: true,
             min_profit: 0.01,
-            max_position: 10.0, // Low max position
+            max_position: 10.0,   // Low max position
             max_notional: 1000.0, // High notional
         };
         let clipper = ClipperStrategy::new(config);

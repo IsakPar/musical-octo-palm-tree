@@ -5,15 +5,48 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::time::{interval, timeout};
+use std::time::Duration;
 use tokio::net::TcpStream;
+use tokio::time::{interval, timeout};
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::market::{DepthLevel, MarketData};
+use crate::metrics::WEBSOCKET_MESSAGES;
+
+/// Parse and validate a price string.
+/// Returns None if the price is not a finite number in range [0.0, 1.0].
+fn parse_price(s: &str) -> Option<f64> {
+    let price: f64 = s.parse().ok()?;
+    if price.is_finite() && (0.0..=1.0).contains(&price) {
+        Some(price)
+    } else {
+        None
+    }
+}
+
+/// Parse and validate a size string.
+/// Returns None if the size is not a positive finite number.
+fn parse_size(s: &str) -> Option<f64> {
+    let size: f64 = s.parse().ok()?;
+    if size.is_finite() && size > 0.0 {
+        Some(size)
+    } else {
+        None
+    }
+}
+
+/// Get current time as nanoseconds since UNIX epoch (lock-free timestamp)
+fn now_ns() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64
+}
 
 /// WebSocket message types from Polymarket
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 pub enum WsMessage {
@@ -22,11 +55,12 @@ pub enum WsMessage {
     #[serde(rename = "price_change")]
     PriceChange(PriceChangeUpdate),
     #[serde(rename = "tick_size_change")]
-    TickSizeChange(TickSizeChangeUpdate),
+    TickSizeChange(()),
     #[serde(other)]
     Unknown,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct BookUpdate {
     pub asset_id: String,
@@ -49,6 +83,9 @@ pub struct PriceChangeUpdate {
     pub side: String,
 }
 
+// TickSizeChangeUpdate is now parsed as () since we don't use it
+// but keeping the struct definition for documentation
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct TickSizeChangeUpdate {
     pub asset_id: String,
@@ -63,6 +100,7 @@ pub struct SubscribeMessage {
 }
 
 /// WebSocket connection statistics for observability
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct WebSocketStats {
     pub messages_received: u64,
@@ -76,34 +114,39 @@ pub struct WebSocketStats {
 pub struct WebSocketHandler {
     url: String,
     market_data: Arc<MarketData>,
+    cancellation_token: CancellationToken,
     // Stats for logging
     messages_received: AtomicU64,
     book_updates: AtomicU64,
     price_changes: AtomicU64,
     reconnect_count: AtomicU64,
-    connection_start: std::sync::Mutex<Option<Instant>>,
+    /// Connection start time as nanoseconds since UNIX epoch (0 = not connected)
+    connection_start_ns: AtomicU64,
 }
 
 impl WebSocketHandler {
-    pub fn new(url: String, market_data: Arc<MarketData>) -> Self {
+    pub fn new(url: String, market_data: Arc<MarketData>, cancellation_token: CancellationToken) -> Self {
         Self {
             url,
             market_data,
+            cancellation_token,
             messages_received: AtomicU64::new(0),
             book_updates: AtomicU64::new(0),
             price_changes: AtomicU64::new(0),
             reconnect_count: AtomicU64::new(0),
-            connection_start: std::sync::Mutex::new(None),
+            connection_start_ns: AtomicU64::new(0), // 0 = not connected
         }
     }
 
     /// Get WebSocket stats for health checks
     pub fn get_stats(&self) -> WebSocketStats {
-        let uptime_secs = self.connection_start
-            .lock()
-            .unwrap()
-            .map(|start| start.elapsed().as_secs())
-            .unwrap_or(0);
+        let start_ns = self.connection_start_ns.load(Ordering::Relaxed);
+        let uptime_secs = if start_ns == 0 {
+            0
+        } else {
+            let elapsed_ns = now_ns().saturating_sub(start_ns);
+            elapsed_ns / 1_000_000_000 // Convert ns to seconds
+        };
 
         WebSocketStats {
             messages_received: self.messages_received.load(Ordering::Relaxed),
@@ -119,29 +162,61 @@ impl WebSocketHandler {
         info!("[WS] WebSocket handler starting | url={}", self.url);
 
         loop {
+            // Check for cancellation before each connection attempt
+            if self.cancellation_token.is_cancelled() {
+                info!("[WS] Shutdown requested - stopping WebSocket handler");
+                return Ok(());
+            }
+
             match self.connect_and_handle().await {
                 Ok(_) => {
                     info!("[WS] WebSocket connection closed normally");
                 }
                 Err(e) => {
+                    // Check if we were cancelled during connection
+                    if self.cancellation_token.is_cancelled() {
+                        info!("[WS] Shutdown requested - stopping WebSocket handler");
+                        return Ok(());
+                    }
                     error!("[WS] WebSocket error: {}", e);
                 }
             }
 
-            // Clear connection start time
-            *self.connection_start.lock().unwrap() = None;
+            // Check for cancellation before reconnect
+            if self.cancellation_token.is_cancelled() {
+                info!("[WS] Shutdown requested - stopping WebSocket handler");
+                return Ok(());
+            }
+
+            // Clear connection start time (0 = not connected)
+            self.connection_start_ns.store(0, Ordering::Relaxed);
 
             // Increment reconnect counter
             let reconnects = self.reconnect_count.fetch_add(1, Ordering::Relaxed) + 1;
 
+            // Calculate exponential backoff with jitter
+            let base_delay = 5u64;
+            let max_delay = 300u64;
+            let backoff_factor = 2u64.pow((reconnects - 1).min(6) as u32);
+            let delay_secs = (base_delay * backoff_factor).min(max_delay);
+            let jitter = rand::random::<u64>() % (delay_secs / 5 + 1);
+            let final_delay = delay_secs + jitter;
+
             // Log stats before reconnect
             let stats = self.get_stats();
             warn!(
-                "[WS] Reconnecting in 5s | reconnects={} | total_msgs={} | books={} | prices={}",
-                reconnects, stats.messages_received, stats.book_updates, stats.price_changes
+                "[WS] Reconnecting in {}s (attempt {}) | total_msgs={} | books={} | prices={}",
+                final_delay, reconnects, stats.messages_received, stats.book_updates, stats.price_changes
             );
 
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            // Sleep with cancellation support
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(final_delay)) => {}
+                _ = self.cancellation_token.cancelled() => {
+                    info!("[WS] Shutdown requested during reconnect delay - stopping WebSocket handler");
+                    return Ok(());
+                }
+            }
         }
     }
 
@@ -151,27 +226,24 @@ impl WebSocketHandler {
 
         // Use rustls-tls-native-roots (via tokio-tungstenite feature flags)
         let connect_future = connect_async(&self.url);
-        let timeout_result: Result<
-            Result<(WebSocketStream<MaybeTlsStream<TcpStream>>, _), _>,
-            _
-        > = timeout(Duration::from_secs(10), connect_future).await;
+        let timeout_result: Result<Result<(WebSocketStream<MaybeTlsStream<TcpStream>>, _), _>, _> =
+            timeout(Duration::from_secs(10), connect_future).await;
         let (ws_stream, _) = timeout_result
             .context("Connection timeout")?
             .context("Failed to connect")?;
 
         // Set connection start time for uptime tracking
-        *self.connection_start.lock().unwrap() = Some(Instant::now());
+        self.connection_start_ns.store(now_ns(), Ordering::Relaxed);
+
+        // Reset reconnect counter on successful connection
+        self.reconnect_count.store(0, Ordering::Relaxed);
 
         info!("[WS] WebSocket connected successfully");
 
         let (mut write, mut read) = ws_stream.split();
 
         // Send subscription for all tracked tokens
-        let token_ids: Vec<String> = self
-            .market_data
-            .iter_prices()
-            .map(|(id, _)| id)
-            .collect();
+        let token_ids: Vec<String> = self.market_data.iter_prices().map(|(id, _)| id).collect();
 
         if !token_ids.is_empty() {
             let subscribe_msg = SubscribeMessage {
@@ -195,11 +267,20 @@ impl WebSocketHandler {
 
         loop {
             tokio::select! {
+                // Check for cancellation
+                _ = self.cancellation_token.cancelled() => {
+                    info!("[WS] Shutdown requested - closing WebSocket connection gracefully");
+                    // Send close frame to cleanly close the WebSocket
+                    let _ = write.send(Message::Close(None)).await;
+                    return Ok(());
+                }
+
                 // Handle incoming messages
                 msg = read.next() => {
                     match msg {
                         Some(Ok(Message::Text(text))) => {
                             self.messages_received.fetch_add(1, Ordering::Relaxed);
+                            WEBSOCKET_MESSAGES.inc();
                             self.handle_message(&text);
                         }
                         Some(Ok(Message::Ping(data))) => {
@@ -276,27 +357,17 @@ impl WebSocketHandler {
         // Increment counter
         self.book_updates.fetch_add(1, Ordering::Relaxed);
 
-        // Parse ALL depth levels (not just first)
+        // Parse ALL depth levels (not just first) with validation
         let bids: Vec<DepthLevel> = update
             .bids
             .iter()
-            .filter_map(|p| {
-                Some(DepthLevel::new(
-                    p.price.parse().ok()?,
-                    p.size.parse().ok()?,
-                ))
-            })
+            .filter_map(|p| Some(DepthLevel::new(parse_price(&p.price)?, parse_size(&p.size)?)))
             .collect();
 
         let asks: Vec<DepthLevel> = update
             .asks
             .iter()
-            .filter_map(|p| {
-                Some(DepthLevel::new(
-                    p.price.parse().ok()?,
-                    p.size.parse().ok()?,
-                ))
-            })
+            .filter_map(|p| Some(DepthLevel::new(parse_price(&p.price)?, parse_size(&p.size)?)))
             .collect();
 
         // Store full order book depth
@@ -324,7 +395,8 @@ impl WebSocketHandler {
         // Increment counter
         self.price_changes.fetch_add(1, Ordering::Relaxed);
 
-        if let Ok(price) = update.price.parse::<f64>() {
+        // Validate price is in valid range [0.0, 1.0]
+        if let Some(price) = parse_price(&update.price) {
             // Get current price to update only one side
             if let Some(current) = self.market_data.get_price(&update.asset_id) {
                 let (bid, ask) = if update.side == "BUY" {
@@ -346,6 +418,7 @@ impl WebSocketHandler {
     }
 
     /// Subscribe to additional tokens
+    #[allow(dead_code)]
     pub async fn subscribe(&self, token_ids: Vec<String>) -> Result<()> {
         // This would need a reference to the write half
         // For now, tokens should be pre-registered before connecting

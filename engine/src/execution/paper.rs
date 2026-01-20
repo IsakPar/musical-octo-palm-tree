@@ -13,6 +13,7 @@ use crate::execution::Side;
 use crate::market::{MarketData, TokenId};
 
 /// A simulated fill
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct PaperFill {
     pub token_id: TokenId,
@@ -23,6 +24,7 @@ pub struct PaperFill {
 }
 
 /// A completed arbitrage trade (both legs)
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct PaperArbTrade {
     pub yes_fill: PaperFill,
@@ -33,6 +35,7 @@ pub struct PaperArbTrade {
 }
 
 /// Paper trading simulator for validating strategies
+#[allow(dead_code)]
 pub struct PaperTrader {
     fills: RwLock<Vec<PaperFill>>,
     arb_trades: RwLock<Vec<PaperArbTrade>>,
@@ -41,6 +44,7 @@ pub struct PaperTrader {
     fee_rate: f64,
 }
 
+#[allow(dead_code)]
 impl PaperTrader {
     /// Create a new paper trader
     pub fn new(fee_rate: f64) -> Self {
@@ -184,6 +188,7 @@ impl PaperTrader {
 }
 
 /// Summary statistics for paper trading
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct PaperTraderStats {
     pub trade_count: usize,

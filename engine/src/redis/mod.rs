@@ -5,12 +5,7 @@
 
 mod publisher;
 
+#[allow(unused_imports)]
 pub use publisher::{
-    RedisPublisher,
-    EngineState,
-    SignalMessage,
-    TradeMessage,
-    ErrorMessage,
-    PositionInfo,
-    now_ms,
+    now_ms, EngineState, ErrorMessage, PositionInfo, RedisPublisher, SignalMessage, TradeMessage,
 };

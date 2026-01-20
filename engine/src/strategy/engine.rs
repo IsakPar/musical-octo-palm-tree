@@ -1,19 +1,29 @@
 //! Strategy engine that runs all strategies in a loop.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::time::interval;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::db::{TradeRepository, Trade, ArbTrade};
+use crate::db::{ArbTrade, Trade, TradeRepository};
 use crate::execution::OrderManager;
 use crate::market::MarketData;
-use crate::notifications::{SlackNotifier, OrderNotification};
-use crate::redis::{RedisPublisher, SignalMessage, TradeMessage, EngineState, now_ms};
+use crate::metrics::{DAILY_PNL, EVALUATIONS_TOTAL, SIGNALS_TOTAL};
+use crate::notifications::{OrderNotification, SlackNotifier};
+use crate::redis::{now_ms, EngineState, RedisPublisher, SignalMessage, TradeMessage};
 use crate::risk::RiskManager;
 
 use super::{Strategy, TradeSignal};
+
+/// Get current time as nanoseconds since UNIX epoch (lock-free timestamp)
+fn now_ns() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64
+}
 
 /// Named signal for tracking which strategy generated it
 struct NamedSignal {
@@ -30,12 +40,15 @@ pub struct StrategyEngine {
     redis_publisher: Option<Arc<RedisPublisher>>,
     slack_notifier: Option<Arc<SlackNotifier>>,
     trade_repo: Option<Arc<TradeRepository>>,
+    cancellation_token: Option<CancellationToken>,
     eval_interval_ms: u64,
     // Metrics for logging
     eval_count: AtomicU64,
     signal_count: AtomicU64,
-    last_heartbeat: std::sync::Mutex<Instant>,
-    start_time: Instant,
+    /// Last heartbeat time as nanoseconds since UNIX epoch (lock-free)
+    last_heartbeat_ns: AtomicU64,
+    /// Engine start time as nanoseconds since UNIX epoch
+    start_time_ns: u64,
 }
 
 impl StrategyEngine {
@@ -53,12 +66,18 @@ impl StrategyEngine {
             redis_publisher: None,
             slack_notifier: None,
             trade_repo: None,
+            cancellation_token: None,
             eval_interval_ms: 100, // 10 Hz by default
             eval_count: AtomicU64::new(0),
             signal_count: AtomicU64::new(0),
-            last_heartbeat: std::sync::Mutex::new(Instant::now()),
-            start_time: Instant::now(),
+            last_heartbeat_ns: AtomicU64::new(now_ns()),
+            start_time_ns: now_ns(),
         }
+    }
+
+    /// Set the cancellation token for graceful shutdown.
+    pub fn set_cancellation_token(&mut self, token: CancellationToken) {
+        self.cancellation_token = Some(token);
     }
 
     /// Set the Redis publisher for streaming data to dashboard.
@@ -92,6 +111,7 @@ impl StrategyEngine {
     }
 
     /// Set the evaluation interval in milliseconds.
+    #[allow(dead_code)]
     pub fn set_eval_interval(&mut self, ms: u64) {
         self.eval_interval_ms = ms;
     }
@@ -109,7 +129,26 @@ impl StrategyEngine {
         let heartbeat_interval = Duration::from_secs(60); // Log heartbeat every minute
 
         loop {
-            ticker.tick().await;
+            // Check for cancellation with cancellation-aware tick
+            if let Some(ref token) = self.cancellation_token {
+                tokio::select! {
+                    _ = ticker.tick() => {}
+                    _ = token.cancelled() => {
+                        info!("[ENGINE] Shutdown requested - stopping strategy engine gracefully");
+                        return;
+                    }
+                }
+            } else {
+                ticker.tick().await;
+            }
+
+            // Check for cancellation at the start of each loop iteration
+            if let Some(ref token) = self.cancellation_token {
+                if token.is_cancelled() {
+                    info!("[ENGINE] Shutdown requested - stopping strategy engine gracefully");
+                    return;
+                }
+            }
 
             // Skip if no market data yet
             if !self.market_data.has_data() {
@@ -125,46 +164,50 @@ impl StrategyEngine {
                 info!("[HEARTBEAT] Market data received! Starting strategy evaluation.");
             }
 
-            // Increment eval counter
+            // Increment eval counter (both internal counter and Prometheus metric)
             let evals = self.eval_count.fetch_add(1, Ordering::Relaxed) + 1;
+            EVALUATIONS_TOTAL.inc();
 
             // Periodic heartbeat log and Redis state publish (every minute)
-            {
-                let mut last_hb = self.last_heartbeat.lock().unwrap();
-                if last_hb.elapsed() >= heartbeat_interval {
-                    let signals = self.signal_count.load(Ordering::Relaxed);
-                    let markets = self.market_data.get_all_pairs().len();
-                    let order_books = self.market_data.order_book_count();
-                    let uptime_secs = self.start_time.elapsed().as_secs();
+            let heartbeat_interval_ns = heartbeat_interval.as_nanos() as u64;
+            let current_ns = now_ns();
+            let last_hb_ns = self.last_heartbeat_ns.load(Ordering::Relaxed);
+            if current_ns.saturating_sub(last_hb_ns) >= heartbeat_interval_ns {
+                let signals = self.signal_count.load(Ordering::Relaxed);
+                let markets = self.market_data.get_all_pairs().len();
+                let order_books = self.market_data.order_book_count();
+                let uptime_secs = current_ns.saturating_sub(self.start_time_ns) / 1_000_000_000;
 
-                    info!(
-                        "[HEARTBEAT] Engine alive | evals={} | signals={} | markets={} | order_books={} | uptime={}s",
-                        evals,
-                        signals,
-                        markets,
-                        order_books,
-                        uptime_secs
-                    );
+                info!(
+                    "[HEARTBEAT] Engine alive | evals={} | signals={} | markets={} | order_books={} | uptime={}s",
+                    evals,
+                    signals,
+                    markets,
+                    order_books,
+                    uptime_secs
+                );
 
-                    // Publish state to Redis (fire-and-forget, non-blocking)
-                    if let Some(ref publisher) = self.redis_publisher {
-                        let state = EngineState {
-                            timestamp_ms: now_ms(),
-                            status: "running".to_string(),
-                            markets_tracked: markets,
-                            opportunities_found: signals as usize,
-                            daily_pnl: self.risk_manager.get_daily_pnl(),
-                            daily_trades: self.risk_manager.get_daily_trades(),
-                            positions: vec![], // TODO: Get from risk manager
-                        };
-                        let pub_clone = Arc::clone(publisher);
-                        tokio::spawn(async move {
-                            let _ = pub_clone.publish_state(&state).await;
-                        });
-                    }
+                // Update Prometheus daily P&L gauge
+                DAILY_PNL.set(self.risk_manager.get_daily_pnl());
 
-                    *last_hb = Instant::now();
+                // Publish state to Redis (fire-and-forget, non-blocking)
+                if let Some(ref publisher) = self.redis_publisher {
+                    let state = EngineState {
+                        timestamp_ms: now_ms(),
+                        status: "running".to_string(),
+                        markets_tracked: markets,
+                        opportunities_found: signals as usize,
+                        daily_pnl: self.risk_manager.get_daily_pnl(),
+                        daily_trades: self.risk_manager.get_daily_trades(),
+                        positions: vec![], // TODO: Get from risk manager
+                    };
+                    let pub_clone = Arc::clone(publisher);
+                    tokio::spawn(async move {
+                        let _ = pub_clone.publish_state(&state).await;
+                    });
                 }
+
+                self.last_heartbeat_ns.store(current_ns, Ordering::Relaxed);
             }
 
             // Phase 1: Collect all signals from all strategies (sync, CPU-bound)
@@ -173,10 +216,12 @@ impl StrategyEngine {
                 .iter()
                 .filter(|s| s.is_active())
                 .filter_map(|strategy| {
-                    strategy.evaluate(&self.market_data).map(|signal| NamedSignal {
-                        strategy_name: strategy.name(),
-                        signal,
-                    })
+                    strategy
+                        .evaluate(&self.market_data)
+                        .map(|signal| NamedSignal {
+                            strategy_name: strategy.name(),
+                            signal,
+                        })
                 })
                 .collect();
 
@@ -185,12 +230,10 @@ impl StrategyEngine {
             }
 
             // Count signals
-            self.signal_count.fetch_add(signals.len() as u64, Ordering::Relaxed);
+            self.signal_count
+                .fetch_add(signals.len() as u64, Ordering::Relaxed);
 
-            info!(
-                "[ENGINE] {} signal(s) generated this cycle",
-                signals.len()
-            );
+            info!("[ENGINE] {} signal(s) generated this cycle", signals.len());
 
             // Phase 2: Handle signals concurrently (async, I/O-bound)
             // This allows multiple orders to be in-flight simultaneously
@@ -205,11 +248,17 @@ impl StrategyEngine {
 
     /// Handle a trade signal from a strategy.
     async fn handle_signal(&self, strategy_name: &str, signal: TradeSignal) {
-        info!(
-            "[{}] Signal: {}",
-            strategy_name,
-            signal.description()
-        );
+        info!("[{}] Signal: {}", strategy_name, signal.description());
+
+        // Record signal in Prometheus metrics
+        let signal_type = match &signal {
+            TradeSignal::Buy { .. } => "buy",
+            TradeSignal::Sell { .. } => "sell",
+            TradeSignal::Arbitrage { .. } => "arbitrage",
+        };
+        SIGNALS_TOTAL
+            .with_label_values(&[strategy_name, signal_type])
+            .inc();
 
         // Publish signal to Redis (fire-and-forget)
         self.publish_signal_to_redis(strategy_name, &signal);
@@ -231,47 +280,131 @@ impl StrategyEngine {
                 price,
                 size,
                 reason,
-            } => {
-                match self.order_manager.place_buy(token_id, *price, *size).await {
-                    Ok(order_id) => {
-                        info!("[{}] Buy order placed: {}", strategy_name, order_id);
-                        self.risk_manager.record_trade(&signal);
-                        self.publish_trade_to_redis(strategy_name, &signal, Some(&order_id), "FILLED");
-                        self.notify_slack_order(strategy_name, "BUY", Some(token_id), None, None, Some(*price), None, None, *size, Some(&order_id), "FILLED", None);
-                        self.persist_trade_to_db(strategy_name, token_id, "BUY", *price, *size, Some(&order_id), "FILLED", Some(reason.as_str()));
-                    }
-                    Err(e) => {
-                        warn!("[{}] Buy order failed: {}", strategy_name, e);
-                        let status = format!("FAILED: {}", e);
-                        self.publish_trade_to_redis(strategy_name, &signal, None, &status);
-                        self.notify_slack_order(strategy_name, "BUY", Some(token_id), None, None, Some(*price), None, None, *size, None, &status, None);
-                        self.persist_trade_to_db(strategy_name, token_id, "BUY", *price, *size, None, &status, Some(reason.as_str()));
-                    }
+            } => match self.order_manager.place_buy(token_id, *price, *size).await {
+                Ok(order_id) => {
+                    info!("[{}] Buy order placed: {}", strategy_name, order_id);
+                    self.risk_manager.record_trade(&signal);
+                    self.publish_trade_to_redis(strategy_name, &signal, Some(&order_id), "FILLED");
+                    self.notify_slack_order(
+                        strategy_name,
+                        "BUY",
+                        Some(token_id),
+                        None,
+                        None,
+                        Some(*price),
+                        None,
+                        None,
+                        *size,
+                        Some(&order_id),
+                        "FILLED",
+                        None,
+                    );
+                    self.persist_trade_to_db(
+                        strategy_name,
+                        token_id,
+                        "BUY",
+                        *price,
+                        *size,
+                        Some(&order_id),
+                        "FILLED",
+                        Some(reason.as_str()),
+                    );
                 }
-            }
+                Err(e) => {
+                    warn!("[{}] Buy order failed: {}", strategy_name, e);
+                    let status = format!("FAILED: {}", e);
+                    self.publish_trade_to_redis(strategy_name, &signal, None, &status);
+                    self.notify_slack_order(
+                        strategy_name,
+                        "BUY",
+                        Some(token_id),
+                        None,
+                        None,
+                        Some(*price),
+                        None,
+                        None,
+                        *size,
+                        None,
+                        &status,
+                        None,
+                    );
+                    self.persist_trade_to_db(
+                        strategy_name,
+                        token_id,
+                        "BUY",
+                        *price,
+                        *size,
+                        None,
+                        &status,
+                        Some(reason.as_str()),
+                    );
+                }
+            },
             TradeSignal::Sell {
                 token_id,
                 price,
                 size,
                 reason,
-            } => {
-                match self.order_manager.place_sell(token_id, *price, *size).await {
-                    Ok(order_id) => {
-                        info!("[{}] Sell order placed: {}", strategy_name, order_id);
-                        self.risk_manager.record_trade(&signal);
-                        self.publish_trade_to_redis(strategy_name, &signal, Some(&order_id), "FILLED");
-                        self.notify_slack_order(strategy_name, "SELL", Some(token_id), None, None, Some(*price), None, None, *size, Some(&order_id), "FILLED", None);
-                        self.persist_trade_to_db(strategy_name, token_id, "SELL", *price, *size, Some(&order_id), "FILLED", Some(reason.as_str()));
-                    }
-                    Err(e) => {
-                        warn!("[{}] Sell order failed: {}", strategy_name, e);
-                        let status = format!("FAILED: {}", e);
-                        self.publish_trade_to_redis(strategy_name, &signal, None, &status);
-                        self.notify_slack_order(strategy_name, "SELL", Some(token_id), None, None, Some(*price), None, None, *size, None, &status, None);
-                        self.persist_trade_to_db(strategy_name, token_id, "SELL", *price, *size, None, &status, Some(reason.as_str()));
-                    }
+            } => match self.order_manager.place_sell(token_id, *price, *size).await {
+                Ok(order_id) => {
+                    info!("[{}] Sell order placed: {}", strategy_name, order_id);
+                    self.risk_manager.record_trade(&signal);
+                    self.publish_trade_to_redis(strategy_name, &signal, Some(&order_id), "FILLED");
+                    self.notify_slack_order(
+                        strategy_name,
+                        "SELL",
+                        Some(token_id),
+                        None,
+                        None,
+                        Some(*price),
+                        None,
+                        None,
+                        *size,
+                        Some(&order_id),
+                        "FILLED",
+                        None,
+                    );
+                    self.persist_trade_to_db(
+                        strategy_name,
+                        token_id,
+                        "SELL",
+                        *price,
+                        *size,
+                        Some(&order_id),
+                        "FILLED",
+                        Some(reason.as_str()),
+                    );
                 }
-            }
+                Err(e) => {
+                    warn!("[{}] Sell order failed: {}", strategy_name, e);
+                    let status = format!("FAILED: {}", e);
+                    self.publish_trade_to_redis(strategy_name, &signal, None, &status);
+                    self.notify_slack_order(
+                        strategy_name,
+                        "SELL",
+                        Some(token_id),
+                        None,
+                        None,
+                        Some(*price),
+                        None,
+                        None,
+                        *size,
+                        None,
+                        &status,
+                        None,
+                    );
+                    self.persist_trade_to_db(
+                        strategy_name,
+                        token_id,
+                        "SELL",
+                        *price,
+                        *size,
+                        None,
+                        &status,
+                        Some(reason.as_str()),
+                    );
+                }
+            },
             TradeSignal::Arbitrage {
                 yes_token,
                 no_token,
@@ -301,28 +434,84 @@ impl StrategyEngine {
                         // Publish arbitrage trade
                         self.publish_arb_trade_to_redis(
                             strategy_name,
-                            yes_token, no_token,
-                            *yes_price, *no_price,
-                            *size, *profit_per_share,
-                            Some(&yes_id), Some(&no_id),
-                            "FILLED"
+                            yes_token,
+                            no_token,
+                            *yes_price,
+                            *no_price,
+                            *size,
+                            *profit_per_share,
+                            Some(&yes_id),
+                            Some(&no_id),
+                            "FILLED",
                         );
-                        self.notify_slack_order(strategy_name, "ARBITRAGE", None, Some(yes_token), Some(no_token), None, Some(*yes_price), Some(*no_price), *size, None, "FILLED", Some(pnl));
-                        self.persist_arb_trade_to_db(strategy_name, yes_token, no_token, *yes_price, *no_price, *size, *profit_per_share, Some(&yes_id), Some(&no_id), "FILLED");
+                        self.notify_slack_order(
+                            strategy_name,
+                            "ARBITRAGE",
+                            None,
+                            Some(yes_token),
+                            Some(no_token),
+                            None,
+                            Some(*yes_price),
+                            Some(*no_price),
+                            *size,
+                            None,
+                            "FILLED",
+                            Some(pnl),
+                        );
+                        self.persist_arb_trade_to_db(
+                            strategy_name,
+                            yes_token,
+                            no_token,
+                            *yes_price,
+                            *no_price,
+                            *size,
+                            *profit_per_share,
+                            Some(&yes_id),
+                            Some(&no_id),
+                            "FILLED",
+                        );
                     }
                     (Err(e), _) | (_, Err(e)) => {
                         warn!("[{}] Arbitrage order failed: {}", strategy_name, e);
                         let status = format!("FAILED: {}", e);
                         self.publish_arb_trade_to_redis(
                             strategy_name,
-                            yes_token, no_token,
-                            *yes_price, *no_price,
-                            *size, *profit_per_share,
-                            None, None,
-                            &status
+                            yes_token,
+                            no_token,
+                            *yes_price,
+                            *no_price,
+                            *size,
+                            *profit_per_share,
+                            None,
+                            None,
+                            &status,
                         );
-                        self.notify_slack_order(strategy_name, "ARBITRAGE", None, Some(yes_token), Some(no_token), None, Some(*yes_price), Some(*no_price), *size, None, &status, None);
-                        self.persist_arb_trade_to_db(strategy_name, yes_token, no_token, *yes_price, *no_price, *size, *profit_per_share, None, None, &status);
+                        self.notify_slack_order(
+                            strategy_name,
+                            "ARBITRAGE",
+                            None,
+                            Some(yes_token),
+                            Some(no_token),
+                            None,
+                            Some(*yes_price),
+                            Some(*no_price),
+                            *size,
+                            None,
+                            &status,
+                            None,
+                        );
+                        self.persist_arb_trade_to_db(
+                            strategy_name,
+                            yes_token,
+                            no_token,
+                            *yes_price,
+                            *no_price,
+                            *size,
+                            *profit_per_share,
+                            None,
+                            None,
+                            &status,
+                        );
                     }
                 }
             }
@@ -370,7 +559,12 @@ impl StrategyEngine {
     fn publish_signal_to_redis(&self, strategy_name: &str, signal: &TradeSignal) {
         if let Some(ref publisher) = self.redis_publisher {
             let msg = match signal {
-                TradeSignal::Buy { token_id, price, size, reason } => SignalMessage {
+                TradeSignal::Buy {
+                    token_id,
+                    price,
+                    size,
+                    reason,
+                } => SignalMessage {
                     timestamp_ms: now_ms(),
                     strategy: strategy_name.to_string(),
                     signal_type: "BUY".to_string(),
@@ -384,7 +578,12 @@ impl StrategyEngine {
                     edge: None,
                     reason: reason.clone(),
                 },
-                TradeSignal::Sell { token_id, price, size, reason } => SignalMessage {
+                TradeSignal::Sell {
+                    token_id,
+                    price,
+                    size,
+                    reason,
+                } => SignalMessage {
                     timestamp_ms: now_ms(),
                     strategy: strategy_name.to_string(),
                     signal_type: "SELL".to_string(),
@@ -398,7 +597,14 @@ impl StrategyEngine {
                     edge: None,
                     reason: reason.clone(),
                 },
-                TradeSignal::Arbitrage { yes_token, no_token, yes_price, no_price, profit_per_share, size } => SignalMessage {
+                TradeSignal::Arbitrage {
+                    yes_token,
+                    no_token,
+                    yes_price,
+                    no_price,
+                    profit_per_share,
+                    size,
+                } => SignalMessage {
                     timestamp_ms: now_ms(),
                     strategy: strategy_name.to_string(),
                     signal_type: "ARBITRAGE".to_string(),
@@ -410,7 +616,10 @@ impl StrategyEngine {
                     no_price: Some(*no_price),
                     size: *size,
                     edge: Some(*profit_per_share),
-                    reason: format!("Arbitrage: YES@{:.4} + NO@{:.4} = {:.4} profit", yes_price, no_price, profit_per_share),
+                    reason: format!(
+                        "Arbitrage: YES@{:.4} + NO@{:.4} = {:.4} profit",
+                        yes_price, no_price, profit_per_share
+                    ),
                 },
             };
             let pub_clone = Arc::clone(publisher);
@@ -421,10 +630,21 @@ impl StrategyEngine {
     }
 
     /// Publish trade to Redis (fire-and-forget, non-blocking)
-    fn publish_trade_to_redis(&self, strategy_name: &str, signal: &TradeSignal, order_id: Option<&str>, status: &str) {
+    fn publish_trade_to_redis(
+        &self,
+        strategy_name: &str,
+        signal: &TradeSignal,
+        order_id: Option<&str>,
+        status: &str,
+    ) {
         if let Some(ref publisher) = self.redis_publisher {
             let msg = match signal {
-                TradeSignal::Buy { token_id, price, size, .. } => TradeMessage {
+                TradeSignal::Buy {
+                    token_id,
+                    price,
+                    size,
+                    ..
+                } => TradeMessage {
                     timestamp_ms: now_ms(),
                     strategy: strategy_name.to_string(),
                     trade_type: "BUY".to_string(),
@@ -442,7 +662,12 @@ impl StrategyEngine {
                     pnl: None,
                     is_paper: self.order_manager.is_dry_run(),
                 },
-                TradeSignal::Sell { token_id, price, size, .. } => TradeMessage {
+                TradeSignal::Sell {
+                    token_id,
+                    price,
+                    size,
+                    ..
+                } => TradeMessage {
                     timestamp_ms: now_ms(),
                     strategy: strategy_name.to_string(),
                     trade_type: "SELL".to_string(),
@@ -516,7 +741,18 @@ impl StrategyEngine {
     }
 
     /// Persist trade to database (fire-and-forget, non-blocking)
-    fn persist_trade_to_db(&self, strategy_name: &str, token_id: &str, side: &str, price: f64, size: f64, order_id: Option<&str>, status: &str, reason: Option<&str>) {
+    #[allow(clippy::too_many_arguments)]
+    fn persist_trade_to_db(
+        &self,
+        strategy_name: &str,
+        token_id: &str,
+        side: &str,
+        price: f64,
+        size: f64,
+        order_id: Option<&str>,
+        status: &str,
+        reason: Option<&str>,
+    ) {
         if let Some(ref repo) = self.trade_repo {
             let trade = Trade {
                 token_id: token_id.to_string(),
@@ -543,7 +779,7 @@ impl StrategyEngine {
         yes_price: f64,
         no_price: f64,
         size: f64,
-        profit_per_share: f64,
+        _profit_per_share: f64,
         yes_order_id: Option<&str>,
         no_order_id: Option<&str>,
         status: &str,
@@ -556,7 +792,11 @@ impl StrategyEngine {
             let net_profit = gross_profit - fees;
 
             let trade = ArbTrade {
-                market_id: format!("{}:{}", &yes_token[..8.min(yes_token.len())], &no_token[..8.min(no_token.len())]),
+                market_id: format!(
+                    "{}:{}",
+                    &yes_token[..8.min(yes_token.len())],
+                    &no_token[..8.min(no_token.len())]
+                ),
                 yes_token_id: yes_token.to_string(),
                 no_token_id: no_token.to_string(),
                 yes_price,

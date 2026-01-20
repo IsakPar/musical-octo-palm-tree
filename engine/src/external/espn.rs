@@ -13,6 +13,7 @@ use tokio::time::interval;
 use tracing::{debug, info, warn};
 
 /// Supported sports leagues.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum League {
     Nfl,
@@ -34,6 +35,7 @@ impl League {
 }
 
 /// Game status.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GameStatus {
     Scheduled,
@@ -44,6 +46,7 @@ pub enum GameStatus {
 }
 
 /// Represents a game from ESPN.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Game {
     pub id: String,
@@ -55,6 +58,7 @@ pub struct Game {
     pub status: GameStatus,
 }
 
+#[allow(dead_code)]
 impl Game {
     /// Check if home team won.
     pub fn home_won(&self) -> bool {
@@ -126,6 +130,7 @@ struct EspnStatusType {
 }
 
 /// ESPN client for fetching game data.
+#[allow(dead_code)]
 pub struct EspnClient {
     client: Client,
     base_url: String,
@@ -137,28 +142,28 @@ pub struct EspnClient {
     finished_games: Arc<RwLock<Vec<Game>>>,
 }
 
+#[allow(dead_code)]
 impl EspnClient {
     /// Create a new ESPN client.
-    pub fn new(leagues: Vec<League>, poll_interval_ms: u64) -> Self {
-        Self {
-            client: Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .expect("Failed to create HTTP client"),
+    pub fn new(leagues: Vec<League>, poll_interval_ms: u64) -> Result<Self> {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .context("Failed to create ESPN HTTP client")?;
+
+        Ok(Self {
+            client,
             base_url: "https://site.api.espn.com/apis/site/v2/sports".to_string(),
             leagues,
             poll_interval_ms,
             games: Arc::new(RwLock::new(HashMap::new())),
             finished_games: Arc::new(RwLock::new(Vec::new())),
-        }
+        })
     }
 
     /// Start the polling loop.
     pub async fn run(&self) {
-        info!(
-            "ESPN client starting for leagues: {:?}",
-            self.leagues
-        );
+        info!("ESPN client starting for leagues: {:?}", self.leagues);
 
         let mut ticker = interval(Duration::from_millis(self.poll_interval_ms));
 
@@ -175,15 +180,12 @@ impl EspnClient {
 
     /// Fetch games for a specific league.
     async fn fetch_league(&self, league: League) -> Result<()> {
-        let url = format!(
-            "{}/{}/scoreboard",
-            self.base_url,
-            league.api_path()
-        );
+        let url = format!("{}/{}/scoreboard", self.base_url, league.api_path());
 
         debug!("Fetching {:?} from {}", league, url);
 
-        let response: EspnResponse = self.client
+        let response: EspnResponse = self
+            .client
             .get(&url)
             .send()
             .await
@@ -210,7 +212,9 @@ impl EspnClient {
                 if was_in_progress {
                     info!(
                         "Game finished: {} vs {} - Winner: {:?}",
-                        game.home_team, game.away_team, game.winner()
+                        game.home_team,
+                        game.away_team,
+                        game.winner()
                     );
                     new_finished.push(game.clone());
                 }
@@ -242,7 +246,8 @@ impl EspnClient {
 
     /// Parse an ESPN event into a Game.
     fn parse_event(&self, league: League, event: EspnEvent) -> Result<Game> {
-        let competition = event.competitions
+        let competition = event
+            .competitions
             .first()
             .context("No competition in event")?;
 
@@ -252,7 +257,8 @@ impl EspnClient {
         let mut away_score = 0u32;
 
         for competitor in &competition.competitors {
-            let score: u32 = competitor.score
+            let score: u32 = competitor
+                .score
                 .as_deref()
                 .unwrap_or("0")
                 .parse()

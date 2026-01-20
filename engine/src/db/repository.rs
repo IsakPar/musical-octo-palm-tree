@@ -14,11 +14,11 @@ use tracing::{info, warn};
 #[derive(Debug, Clone)]
 pub struct Trade {
     pub token_id: String,
-    pub side: String,       // "BUY" or "SELL"
+    pub side: String, // "BUY" or "SELL"
     pub price: f64,
     pub size: f64,
     pub order_id: Option<String>,
-    pub status: String,     // "FILLED", "FAILED", "PAPER"
+    pub status: String, // "FILLED", "FAILED", "PAPER"
     pub strategy: String,
     pub signal_reason: Option<String>,
     pub is_paper: bool,
@@ -80,6 +80,7 @@ impl TradeRepository {
     }
 
     /// Create a disabled repository (for testing)
+    #[allow(dead_code)]
     pub fn disabled() -> Self {
         Self {
             pool: None,
@@ -150,7 +151,7 @@ impl TradeRepository {
                     yes_order_id, no_order_id, status, strategy, is_paper
                 )
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-                "#
+                "#,
             )
             .bind(&trade.market_id)
             .bind(&trade.yes_token_id)
@@ -177,6 +178,7 @@ impl TradeRepository {
     }
 
     /// Get recent trade count (for health checks)
+    #[allow(dead_code)]
     pub async fn recent_trade_count(&self, minutes: i32) -> Result<i64> {
         if !self.enabled {
             return Ok(0);
@@ -188,7 +190,7 @@ impl TradeRepository {
         };
 
         let result: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM trades WHERE created_at > NOW() - INTERVAL '1 minute' * $1"
+            "SELECT COUNT(*) FROM trades WHERE created_at > NOW() - INTERVAL '1 minute' * $1",
         )
         .bind(minutes)
         .fetch_one(pool)
@@ -198,6 +200,7 @@ impl TradeRepository {
     }
 
     /// Get today's P&L from arbitrage trades
+    #[allow(dead_code)]
     pub async fn today_pnl(&self) -> Result<f64> {
         if !self.enabled {
             return Ok(0.0);
@@ -215,7 +218,7 @@ impl TradeRepository {
             WHERE DATE(created_at) = CURRENT_DATE
               AND status = 'FILLED'
               AND is_paper = false
-            "#
+            "#,
         )
         .fetch_one(pool)
         .await?;
@@ -226,6 +229,7 @@ impl TradeRepository {
 
 /// Helper to create a repository from Arc for sharing
 impl TradeRepository {
+    #[allow(dead_code)]
     pub fn into_arc(self) -> Arc<Self> {
         Arc::new(self)
     }

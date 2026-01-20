@@ -2,14 +2,16 @@
 
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use tracing::{info, warn};
 
 use crate::config::RiskConfig;
 use crate::market::TokenId;
+use crate::metrics::RISK_REJECTIONS;
 use crate::strategy::TradeSignal;
 
 /// Position tracking for a single token.
+#[allow(dead_code)]
 #[derive(Debug, Default, Clone)]
 pub struct Position {
     pub size: f64,
@@ -34,6 +36,9 @@ pub struct RiskManager {
     daily_stats: RwLock<DailyStats>,
     /// Daily P&L in microdollars (1 USD = 1_000_000 microdollars) for atomic ops
     daily_pnl_micro: AtomicI64,
+    /// Emergency stop flag - when true, all trading is halted
+    #[allow(dead_code)]
+    emergency_stop: AtomicBool,
 }
 
 /// Conversion factor: 1 USD = 1_000_000 microdollars
@@ -52,11 +57,21 @@ impl RiskManager {
             positions: RwLock::new(HashMap::new()),
             daily_stats: RwLock::new(DailyStats::default()),
             daily_pnl_micro: AtomicI64::new(0),
+            emergency_stop: AtomicBool::new(false),
         }
     }
 
     /// Check if a signal passes risk checks.
     pub fn check_signal(&self, signal: &TradeSignal) -> bool {
+        // Check emergency stop FIRST - highest priority safety check
+        if self.emergency_stop.load(Ordering::SeqCst) {
+            warn!("[RISK] Signal rejected - Emergency stop is active");
+            RISK_REJECTIONS
+                .with_label_values(&["emergency_stop"])
+                .inc();
+            return false;
+        }
+
         // Check daily loss limit using atomic (no lock needed!)
         let pnl = self.daily_pnl_micro.load(Ordering::Relaxed) as f64 / MICRO_PER_DOLLAR;
         if pnl < -self.config.max_daily_loss {
@@ -64,6 +79,9 @@ impl RiskManager {
                 "Daily loss limit reached: ${:.2} < -${}",
                 pnl, self.config.max_daily_loss
             );
+            RISK_REJECTIONS
+                .with_label_values(&["daily_loss_limit"])
+                .inc();
             return false;
         }
 
@@ -74,6 +92,9 @@ impl RiskManager {
                 "Notional limit exceeded: ${:.2} > ${}",
                 notional, self.config.max_notional
             );
+            RISK_REJECTIONS
+                .with_label_values(&["notional_limit"])
+                .inc();
             return false;
         }
 
@@ -87,6 +108,9 @@ impl RiskManager {
                         "Position limit exceeded: {} + {} > {}",
                         current, size, self.config.max_position
                     );
+                    RISK_REJECTIONS
+                        .with_label_values(&["position_limit"])
+                        .inc();
                     return false;
                 }
             }
@@ -94,10 +118,10 @@ impl RiskManager {
                 let positions = self.positions.read();
                 let current = positions.get(token_id).map(|p| p.size).unwrap_or(0.0);
                 if current < *size {
-                    warn!(
-                        "Cannot sell more than owned: {} < {}",
-                        current, size
-                    );
+                    warn!("Cannot sell more than owned: {} < {}", current, size);
+                    RISK_REJECTIONS
+                        .with_label_values(&["insufficient_position"])
+                        .inc();
                     return false;
                 }
             }
@@ -108,6 +132,9 @@ impl RiskManager {
                         "Arbitrage size exceeds limit: {} > {}",
                         size, self.config.max_position
                     );
+                    RISK_REJECTIONS
+                        .with_label_values(&["position_limit"])
+                        .inc();
                     return false;
                 }
             }
@@ -181,7 +208,8 @@ impl RiskManager {
 
                 // Update atomic P&L (lock-free for check_signal)
                 let profit_micro = (profit * MICRO_PER_DOLLAR) as i64;
-                self.daily_pnl_micro.fetch_add(profit_micro, Ordering::Relaxed);
+                self.daily_pnl_micro
+                    .fetch_add(profit_micro, Ordering::Relaxed);
 
                 info!("Arbitrage profit locked: ${:.2}", profit);
             }
@@ -189,11 +217,13 @@ impl RiskManager {
     }
 
     /// Get current position for a token.
+    #[allow(dead_code)]
     pub fn get_position(&self, token_id: &TokenId) -> Option<Position> {
         self.positions.read().get(token_id).cloned()
     }
 
     /// Get all positions.
+    #[allow(dead_code)]
     pub fn get_all_positions(&self) -> HashMap<TokenId, Position> {
         self.positions.read().clone()
     }
@@ -209,11 +239,37 @@ impl RiskManager {
     }
 
     /// Reset daily stats (call at midnight).
+    #[allow(dead_code)]
     pub fn reset_daily(&self) {
         info!("Resetting daily stats");
         let mut daily = self.daily_stats.write();
         *daily = DailyStats::default();
         self.daily_pnl_micro.store(0, Ordering::Relaxed);
+    }
+
+    /// Activate emergency stop - immediately halts all trading.
+    ///
+    /// This is the highest priority safety mechanism. When activated,
+    /// all signals will be rejected until cleared.
+    #[allow(dead_code)]
+    pub fn emergency_stop(&self) {
+        self.emergency_stop.store(true, Ordering::SeqCst);
+        warn!("[RISK] EMERGENCY STOP ACTIVATED - All trading halted!");
+    }
+
+    /// Check if emergency stop is currently active.
+    #[allow(dead_code)]
+    pub fn is_emergency_stopped(&self) -> bool {
+        self.emergency_stop.load(Ordering::SeqCst)
+    }
+
+    /// Clear emergency stop - resumes normal trading.
+    ///
+    /// Only call this after the emergency condition has been resolved.
+    #[allow(dead_code)]
+    pub fn clear_emergency_stop(&self) {
+        self.emergency_stop.store(false, Ordering::SeqCst);
+        info!("[RISK] Emergency stop cleared - Trading resumed");
     }
 }
 
@@ -290,5 +346,36 @@ mod tests {
 
         // PnL should be (0.60 - 0.50) * 10 = $1.00
         assert!((manager.get_daily_pnl() - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_emergency_stop() {
+        let manager = RiskManager::new(test_config());
+        let signal = TradeSignal::Buy {
+            token_id: "token1".to_string(),
+            price: 0.50,
+            size: 50.0,
+            reason: "test".to_string(),
+        };
+
+        // Initially, emergency stop is not active
+        assert!(!manager.is_emergency_stopped());
+
+        // Signal should pass normally
+        assert!(manager.check_signal(&signal));
+
+        // Activate emergency stop
+        manager.emergency_stop();
+        assert!(manager.is_emergency_stopped());
+
+        // Signal should now be rejected
+        assert!(!manager.check_signal(&signal));
+
+        // Clear emergency stop
+        manager.clear_emergency_stop();
+        assert!(!manager.is_emergency_stopped());
+
+        // Signal should pass again
+        assert!(manager.check_signal(&signal));
     }
 }

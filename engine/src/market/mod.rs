@@ -4,4 +4,5 @@
 
 mod data;
 
+#[allow(unused_imports)]
 pub use data::{DepthLevel, MarketData, MarketPair, OrderBook, PriceLevel, TokenId, VwapResult};

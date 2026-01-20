@@ -6,7 +6,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::analysis::SumDeviationAnalyzer;
 use crate::config::SumTo100Config;

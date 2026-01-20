@@ -49,7 +49,11 @@ impl SumDeviationAnalyzer {
             .collect();
 
         // Sort by edge descending (best opportunities first)
-        opportunities.sort_by(|a, b| b.edge.partial_cmp(&a.edge).unwrap_or(std::cmp::Ordering::Equal));
+        opportunities.sort_by(|a, b| {
+            b.edge
+                .partial_cmp(&a.edge)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         opportunities
     }
@@ -121,7 +125,7 @@ impl SumDeviationAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::market::{DepthLevel, MarketPair, OrderBook};
+    use crate::market::{DepthLevel, MarketPair};
 
     fn create_test_config() -> SumTo100Config {
         SumTo100Config {
@@ -258,10 +262,7 @@ mod tests {
         market_data.update_order_book(
             &"yes_token".into(),
             vec![DepthLevel::new(0.44, 100.0)],
-            vec![
-                DepthLevel::new(0.45, 50.0),
-                DepthLevel::new(0.46, 50.0),
-            ],
+            vec![DepthLevel::new(0.45, 50.0), DepthLevel::new(0.46, 50.0)],
         );
         market_data.update_order_book(
             &"no_token".into(),

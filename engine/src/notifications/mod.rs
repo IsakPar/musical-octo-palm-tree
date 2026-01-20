@@ -5,4 +5,5 @@
 
 mod slack;
 
-pub use slack::{SlackNotifier, OrderNotification, RiskAlert, ErrorAlert};
+#[allow(unused_imports)]
+pub use slack::{ErrorAlert, OrderNotification, RiskAlert, SlackNotifier};

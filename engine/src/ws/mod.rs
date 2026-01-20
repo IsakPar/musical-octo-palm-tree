@@ -2,4 +2,5 @@
 
 mod handler;
 
+#[allow(unused_imports)]
 pub use handler::{WebSocketHandler, WebSocketStats};

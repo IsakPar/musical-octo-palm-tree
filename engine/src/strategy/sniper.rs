@@ -30,6 +30,7 @@ impl SniperStrategy {
     }
 
     /// Mark a game as sniped.
+    #[allow(dead_code)]
     fn mark_sniped(&mut self, game_id: String) {
         self.sniped_games.insert(game_id);
     }

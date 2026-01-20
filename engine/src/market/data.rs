@@ -26,6 +26,7 @@ impl DepthLevel {
 }
 
 /// VWAP calculation result
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VwapResult {
     /// Volume-weighted average price
@@ -37,6 +38,7 @@ pub struct VwapResult {
 }
 
 /// Full order book for a token
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct OrderBook {
     pub token_id: TokenId,
@@ -47,6 +49,7 @@ pub struct OrderBook {
     pub timestamp_ns: u64,
 }
 
+#[allow(dead_code)]
 impl OrderBook {
     pub fn new(token_id: TokenId) -> Self {
         let now = SystemTime::now()
@@ -166,6 +169,7 @@ impl OrderBook {
 }
 
 /// A YES/NO token pair for a market
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct MarketPair {
     pub market_id: MarketId,
@@ -175,6 +179,7 @@ pub struct MarketPair {
 }
 
 /// Price level for a token
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PriceLevel {
     pub bid: f64,
@@ -202,6 +207,7 @@ impl PriceLevel {
 }
 
 /// Price history entry
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub struct PriceTick {
     pub price: f64,
@@ -209,6 +215,7 @@ pub struct PriceTick {
 }
 
 /// Lock-free market data store
+#[allow(dead_code)]
 pub struct MarketData {
     /// Token prices (lock-free reads via DashMap)
     prices: DashMap<TokenId, PriceLevel>,
@@ -232,6 +239,7 @@ pub struct MarketData {
     max_history_size: usize,
 }
 
+#[allow(dead_code)]
 impl MarketData {
     pub fn new() -> Self {
         Self::with_history_size(1024)
@@ -258,7 +266,8 @@ impl MarketData {
         self.prices.insert(token_id.clone(), level);
 
         // Update last update timestamp
-        self.last_update_ns.store(level.timestamp_ns, Ordering::Release);
+        self.last_update_ns
+            .store(level.timestamp_ns, Ordering::Release);
 
         // Add to history
         self.add_to_history(token_id, level.mid, level.timestamp_ns);
@@ -284,7 +293,12 @@ impl MarketData {
 
     /// Update full order book for a token (preserves depth)
     #[inline]
-    pub fn update_order_book(&self, token_id: &TokenId, bids: Vec<DepthLevel>, asks: Vec<DepthLevel>) {
+    pub fn update_order_book(
+        &self,
+        token_id: &TokenId,
+        bids: Vec<DepthLevel>,
+        asks: Vec<DepthLevel>,
+    ) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -316,8 +330,10 @@ impl MarketData {
 
     /// Register a market pair
     pub fn register_pair(&self, pair: MarketPair) {
-        self.token_to_market.insert(pair.yes_token.clone(), pair.market_id.clone());
-        self.token_to_market.insert(pair.no_token.clone(), pair.market_id.clone());
+        self.token_to_market
+            .insert(pair.yes_token.clone(), pair.market_id.clone());
+        self.token_to_market
+            .insert(pair.no_token.clone(), pair.market_id.clone());
         self.pairs.insert(pair.market_id.clone(), pair);
     }
 
@@ -345,7 +361,10 @@ impl MarketData {
 
     /// Get all pairs (for strategies)
     pub fn get_all_pairs(&self) -> Vec<(MarketId, MarketPair)> {
-        self.pairs.iter().map(|r| (r.key().clone(), r.value().clone())).collect()
+        self.pairs
+            .iter()
+            .map(|r| (r.key().clone(), r.value().clone()))
+            .collect()
     }
 
     /// Get sports markets (markets with certain tags/categories)
@@ -409,7 +428,10 @@ impl MarketData {
 
     /// Add price tick to history
     fn add_to_history(&self, token_id: &TokenId, price: f64, timestamp_ns: u64) {
-        let tick = PriceTick { price, timestamp_ns };
+        let tick = PriceTick {
+            price,
+            timestamp_ns,
+        };
 
         self.history
             .entry(token_id.clone())
@@ -522,10 +544,7 @@ mod tests {
     fn test_vwap_buy_multiple_levels() {
         let mut book = OrderBook::new("token1".into());
         // Ask: 100 @ $0.50, 100 @ $0.52
-        book.asks = vec![
-            DepthLevel::new(0.50, 100.0),
-            DepthLevel::new(0.52, 100.0),
-        ];
+        book.asks = vec![DepthLevel::new(0.50, 100.0), DepthLevel::new(0.52, 100.0)];
 
         // Try to buy 150 shares
         // 100 @ 0.50 = $50
@@ -553,10 +572,7 @@ mod tests {
     fn test_vwap_sell_multiple_levels() {
         let mut book = OrderBook::new("token1".into());
         // Bids: 100 @ $0.48 (best), 100 @ $0.46
-        book.bids = vec![
-            DepthLevel::new(0.48, 100.0),
-            DepthLevel::new(0.46, 100.0),
-        ];
+        book.bids = vec![DepthLevel::new(0.48, 100.0), DepthLevel::new(0.46, 100.0)];
 
         // Try to sell 150 shares
         let result = book.vwap_sell(150.0).unwrap();
@@ -571,14 +587,8 @@ mod tests {
         let data = MarketData::new();
         let token = "0x456".to_string();
 
-        let bids = vec![
-            DepthLevel::new(0.48, 100.0),
-            DepthLevel::new(0.46, 200.0),
-        ];
-        let asks = vec![
-            DepthLevel::new(0.50, 150.0),
-            DepthLevel::new(0.52, 100.0),
-        ];
+        let bids = vec![DepthLevel::new(0.48, 100.0), DepthLevel::new(0.46, 200.0)];
+        let asks = vec![DepthLevel::new(0.50, 150.0), DepthLevel::new(0.52, 100.0)];
 
         data.update_order_book(&token, bids, asks);
 

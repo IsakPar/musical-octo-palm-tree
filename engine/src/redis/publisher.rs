@@ -12,9 +12,22 @@ use redis::AsyncCommands;
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
+
+/// Safely serialize a value to JSON, logging on failure instead of panicking.
+/// Returns None if serialization fails, allowing callers to gracefully skip publishing.
+fn serialize_or_log<T: Serialize>(value: &T, context: &str) -> Option<String> {
+    match serde_json::to_string(value) {
+        Ok(json) => Some(json),
+        Err(e) => {
+            warn!("[REDIS] Failed to serialize {}: {}", context, e);
+            None
+        }
+    }
+}
 
 /// Redis channel names
+#[allow(dead_code)]
 pub mod channels {
     pub const STATE: &str = "poly:state";
     pub const SIGNALS: &str = "poly:signals";
@@ -82,6 +95,7 @@ pub struct TradeMessage {
 }
 
 /// Error message
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
 pub struct ErrorMessage {
     pub timestamp_ms: u64,
@@ -106,8 +120,7 @@ impl RedisPublisher {
             Some(url) => {
                 info!("Connecting to Redis at {}", url);
 
-                let client = redis::Client::open(url)
-                    .context("Failed to create Redis client")?;
+                let client = redis::Client::open(url).context("Failed to create Redis client")?;
 
                 let connection = ConnectionManager::new(client)
                     .await
@@ -131,6 +144,7 @@ impl RedisPublisher {
     }
 
     /// Create a disabled publisher (for testing without Redis).
+    #[allow(dead_code)]
     pub fn disabled() -> Self {
         Self {
             connection: Arc::new(RwLock::new(None)),
@@ -159,8 +173,45 @@ impl RedisPublisher {
     }
 
     /// Publish an error.
+    #[allow(dead_code)]
     pub async fn publish_error(&self, error: &ErrorMessage) -> Result<()> {
         self.publish(channels::ERRORS, error).await
+    }
+
+    /// Fire-and-forget state publish. Logs errors instead of returning them.
+    /// Safe to call from spawned async tasks where errors would be silently dropped.
+    #[allow(dead_code)]
+    pub async fn publish_state_logged(&self, state: &EngineState) {
+        if let Err(e) = self.publish_with_context(channels::STATE, state, "engine state").await {
+            warn!("[REDIS] Failed to publish state: {}", e);
+        }
+    }
+
+    /// Fire-and-forget signal publish. Logs errors instead of returning them.
+    /// Safe to call from spawned async tasks where errors would be silently dropped.
+    #[allow(dead_code)]
+    pub async fn publish_signal_logged(&self, signal: &SignalMessage) {
+        if let Err(e) = self.publish_with_context(channels::SIGNALS, signal, "trade signal").await {
+            warn!("[REDIS] Failed to publish signal: {}", e);
+        }
+    }
+
+    /// Fire-and-forget trade publish. Logs errors instead of returning them.
+    /// Safe to call from spawned async tasks where errors would be silently dropped.
+    #[allow(dead_code)]
+    pub async fn publish_trade_logged(&self, trade: &TradeMessage) {
+        if let Err(e) = self.publish_with_context(channels::TRADES, trade, "executed trade").await {
+            warn!("[REDIS] Failed to publish trade: {}", e);
+        }
+    }
+
+    /// Fire-and-forget error publish. Logs errors instead of returning them.
+    /// Safe to call from spawned async tasks where errors would be silently dropped.
+    #[allow(dead_code)]
+    pub async fn publish_error_logged(&self, error: &ErrorMessage) {
+        if let Err(e) = self.publish_with_context(channels::ERRORS, error, "error message").await {
+            warn!("[REDIS] Failed to publish error: {}", e);
+        }
     }
 
     /// Internal publish method.
@@ -169,8 +220,7 @@ impl RedisPublisher {
             return Ok(());
         }
 
-        let json = serde_json::to_string(message)
-            .context("Failed to serialize message")?;
+        let json = serde_json::to_string(message).context("Failed to serialize message")?;
 
         let mut conn_guard = self.connection.write().await;
 
@@ -190,7 +240,43 @@ impl RedisPublisher {
         }
     }
 
+    /// Internal publish method using serialize_or_log for defensive serialization.
+    /// Used by the fire-and-forget `*_logged` methods.
+    async fn publish_with_context<T: Serialize>(
+        &self,
+        channel: &str,
+        message: &T,
+        context: &str,
+    ) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+
+        let json = match serialize_or_log(message, context) {
+            Some(j) => j,
+            None => return Ok(()), // Serialization failed, already logged
+        };
+
+        let mut conn_guard = self.connection.write().await;
+
+        if let Some(ref mut conn) = *conn_guard {
+            match conn.publish::<_, _, i32>(channel, &json).await {
+                Ok(subscribers) => {
+                    debug!("Published {} to {} ({} subscribers)", context, channel, subscribers);
+                    Ok(())
+                }
+                Err(e) => {
+                    warn!("[REDIS] Failed to publish {} to {}: {}", context, channel, e);
+                    Err(e.into())
+                }
+            }
+        } else {
+            Ok(()) // No connection, silently succeed
+        }
+    }
+
     /// Publish a raw JSON string to a channel.
+    #[allow(dead_code)]
     pub async fn publish_raw(&self, channel: &str, json: &str) -> Result<()> {
         if !self.enabled {
             return Ok(());
@@ -209,11 +295,12 @@ impl RedisPublisher {
 }
 
 /// Helper to get current timestamp in milliseconds.
+/// Uses unwrap_or_default() to avoid panics if system time is before UNIX_EPOCH.
 pub fn now_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_millis() as u64
 }
 

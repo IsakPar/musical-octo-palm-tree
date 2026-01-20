@@ -4,4 +4,5 @@
 
 mod sum_deviation;
 
+#[allow(unused_imports)]
 pub use sum_deviation::{SumDeviationAnalyzer, SumDeviationOpportunity};

@@ -19,6 +19,7 @@ struct SlackMessage {
 }
 
 /// Order notification for Slack
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct OrderNotification {
     pub strategy: String,
@@ -37,6 +38,7 @@ pub struct OrderNotification {
 }
 
 /// Risk violation alert for Slack
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct RiskAlert {
     pub alert_type: String, // "DAILY_LOSS", "POSITION_LIMIT", "NOTIONAL_LIMIT"
@@ -46,6 +48,7 @@ pub struct RiskAlert {
 }
 
 /// Error alert for Slack
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ErrorAlert {
     pub source: String,
@@ -54,6 +57,7 @@ pub struct ErrorAlert {
 }
 
 /// Async Slack notifier - all methods are fire-and-forget
+#[allow(dead_code)]
 pub struct SlackNotifier {
     client: Option<Client>,
     webhook_url: Option<String>,
@@ -113,6 +117,7 @@ impl SlackNotifier {
     }
 
     /// Create a disabled notifier (for testing)
+    #[allow(dead_code)]
     pub fn disabled() -> Self {
         Self {
             client: None,
@@ -136,7 +141,13 @@ impl SlackNotifier {
         }
 
         let emoji = match order.status.as_str() {
-            s if s.starts_with("FILLED") => if order.is_paper { ":memo:" } else { ":chart_with_upwards_trend:" },
+            s if s.starts_with("FILLED") => {
+                if order.is_paper {
+                    ":memo:"
+                } else {
+                    ":chart_with_upwards_trend:"
+                }
+            }
             _ => ":x:",
         };
 
@@ -144,7 +155,10 @@ impl SlackNotifier {
 
         let text = match order.order_type.as_str() {
             "ARBITRAGE" => {
-                let pnl_str = order.pnl.map(|p| format!(" | PnL: ${:.2}", p)).unwrap_or_default();
+                let pnl_str = order
+                    .pnl
+                    .map(|p| format!(" | PnL: ${:.2}", p))
+                    .unwrap_or_default();
                 format!(
                     "{} *{}*{} ARB\nYES@${:.4} + NO@${:.4} x {:.0}{}\nStatus: {}",
                     emoji,
@@ -158,7 +172,8 @@ impl SlackNotifier {
                 )
             }
             _ => {
-                let token_short = order.token_id
+                let token_short = order
+                    .token_id
                     .as_ref()
                     .map(|t| &t[..8.min(t.len())])
                     .unwrap_or("???");
@@ -180,6 +195,7 @@ impl SlackNotifier {
     }
 
     /// Notify about a risk violation (fire-and-forget, non-blocking)
+    #[allow(dead_code)]
     pub fn notify_risk(&self, alert: RiskAlert) {
         if !self.enabled || !self.notify_risk {
             return;
@@ -187,16 +203,14 @@ impl SlackNotifier {
 
         let text = format!(
             ":warning: *RISK ALERT: {}*\n{}\nCurrent: {:.2} | Limit: {:.2}",
-            alert.alert_type,
-            alert.message,
-            alert.current_value,
-            alert.limit_value
+            alert.alert_type, alert.message, alert.current_value, alert.limit_value
         );
 
         self.send_message(text, ":rotating_light:");
     }
 
     /// Notify about an error (fire-and-forget, non-blocking)
+    #[allow(dead_code)]
     pub fn notify_error(&self, alert: ErrorAlert) {
         if !self.enabled || !self.notify_errors {
             return;
@@ -204,9 +218,7 @@ impl SlackNotifier {
 
         let text = format!(
             ":x: *ERROR in {}*\nType: {}\n{}",
-            alert.source,
-            alert.error_type,
-            alert.message
+            alert.source, alert.error_type, alert.message
         );
 
         self.send_message(text, ":skull:");
@@ -248,6 +260,7 @@ impl SlackNotifier {
 
 /// Helper to create a notifier from Arc for sharing
 impl SlackNotifier {
+    #[allow(dead_code)]
     pub fn into_arc(self) -> Arc<Self> {
         Arc::new(self)
     }
